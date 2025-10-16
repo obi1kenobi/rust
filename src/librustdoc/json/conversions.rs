@@ -325,15 +325,17 @@ fn from_clean_item(item: &clean::Item, renderer: &JsonRenderer<'_>) -> ItemEnum 
             type_: ci.type_.into_json(renderer),
             value: Some(ci.kind.expr(renderer.tcx)),
         },
-        RequiredAssocTypeItem(g, b) => ItemEnum::AssocType {
-            generics: g.into_json(renderer),
-            bounds: b.into_json(renderer),
+        RequiredAssocTypeItem { generics, bounds, implied_bounds } => ItemEnum::AssocType {
+            generics: generics.into_json(renderer),
+            bounds: bounds.into_json(renderer),
+            implied_bounds: implied_bounds.into_json(renderer),
             type_: None,
         },
-        AssocTypeItem(t, b) => ItemEnum::AssocType {
-            generics: t.generics.into_json(renderer),
-            bounds: b.into_json(renderer),
-            type_: Some(t.item_type.as_ref().unwrap_or(&t.type_).into_json(renderer)),
+        AssocTypeItem { ty, bounds, implied_bounds } => ItemEnum::AssocType {
+            generics: ty.generics.into_json(renderer),
+            bounds: bounds.into_json(renderer),
+            implied_bounds: implied_bounds.into_json(renderer),
+            type_: Some(ty.item_type.as_ref().unwrap_or(&ty.type_).into_json(renderer)),
         },
         // `convert_item` early returns `None` for stripped items, keywords and attributes.
         KeywordItem | AttributeItem => unreachable!(),
@@ -461,8 +463,9 @@ impl FromClean<clean::GenericParamDefKind> for GenericParamDefKind {
             Lifetime { outlives } => {
                 GenericParamDefKind::Lifetime { outlives: outlives.into_json(renderer) }
             }
-            Type { bounds, default, synthetic } => GenericParamDefKind::Type {
+            Type { bounds, implied_bounds, default, synthetic } => GenericParamDefKind::Type {
                 bounds: bounds.into_json(renderer),
+                implied_bounds: implied_bounds.into_json(renderer),
                 default: default.into_json(renderer),
                 is_synthetic: *synthetic,
             },
@@ -478,11 +481,14 @@ impl FromClean<clean::WherePredicate> for WherePredicate {
     fn from_clean(predicate: &clean::WherePredicate, renderer: &JsonRenderer<'_>) -> Self {
         use clean::WherePredicate::*;
         match predicate {
-            BoundPredicate { ty, bounds, bound_params } => WherePredicate::BoundPredicate {
-                type_: ty.into_json(renderer),
-                bounds: bounds.into_json(renderer),
-                generic_params: bound_params.into_json(renderer),
-            },
+            BoundPredicate { ty, bounds, implied_bounds, bound_params } => {
+                WherePredicate::BoundPredicate {
+                    type_: ty.into_json(renderer),
+                    bounds: bounds.into_json(renderer),
+                    implied_bounds: implied_bounds.into_json(renderer),
+                    generic_params: bound_params.into_json(renderer),
+                }
+            }
             RegionPredicate { lifetime, bounds } => WherePredicate::LifetimePredicate {
                 lifetime: lifetime.into_json(renderer),
                 outlives: bounds
@@ -578,7 +584,10 @@ impl FromClean<clean::Type> for Type {
                 type_: Box::new(t.into_json(renderer)),
                 __pat_unstable_do_not_use: p.to_string(),
             },
-            ImplTrait(g) => Type::ImplTrait(g.into_json(renderer)),
+            ImplTrait { bounds, implied_bounds } => Type::ImplTrait {
+                bounds: bounds.into_json(renderer),
+                implied_bounds: implied_bounds.into_json(renderer),
+            },
             Infer => Type::Infer,
             RawPointer(mutability, type_) => Type::RawPointer {
                 is_mutable: *mutability == ast::Mutability::Mut,

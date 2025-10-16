@@ -352,6 +352,7 @@ fn clean_where_predicate<'tcx>(
                 ty: clean_ty(wbp.bounded_ty, cx),
                 bounds: wbp.bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect(),
                 bound_params,
+                implied_bounds: Vec::new(), // TODO: populate based on `bounds`.
             }
         }
 
@@ -405,6 +406,7 @@ fn clean_poly_trait_predicate<'tcx>(
         ty: clean_middle_ty(poly_trait_ref.self_ty(), cx, None, None),
         bounds: vec![clean_poly_trait_ref_with_constraints(cx, poly_trait_ref, ThinVec::new())],
         bound_params: Vec::new(),
+        implied_bounds: Vec::new(), // TODO
     })
 }
 
@@ -433,6 +435,7 @@ fn clean_type_outlives_predicate<'tcx>(
         bounds: vec![GenericBound::Outlives(
             clean_middle_region(lt, cx).expect("failed to clean lifetimes"),
         )],
+        implied_bounds: Vec::new(), // TODO: check this, and either replace or add an explanation for why it's correct
         bound_params: Vec::new(),
     }
 }
@@ -545,6 +548,7 @@ fn clean_generic_param_def(
                 def.name,
                 GenericParamDefKind::Type {
                     bounds: ThinVec::new(), // These are filled in from the where-clauses.
+                    implied_bounds: ThinVec::new(), // These are filled in based on `bounds`.
                     default: default.map(Box::new),
                     synthetic,
                 },
@@ -619,12 +623,14 @@ fn clean_generic_param<'tcx>(
             } else {
                 ThinVec::new()
             };
+            let implied_bounds = ThinVec::new(); // TODO
             (
                 param.name.ident().name,
                 GenericParamDefKind::Type {
                     bounds,
                     default: default.map(|t| clean_ty(t, cx)).map(Box::new),
                     synthetic,
+                    implied_bounds,
                 },
             )
         }
@@ -688,10 +694,10 @@ pub(crate) fn clean_generics<'tcx>(
     let mut eq_predicates = ThinVec::default();
     for pred in gens.predicates.iter().filter_map(|x| clean_where_predicate(x, cx)) {
         match pred {
-            WherePredicate::BoundPredicate { ty, bounds, bound_params } => {
+            WherePredicate::BoundPredicate { ty, bounds, bound_params, implied_bounds } => {
                 match bound_predicates.entry(ty) {
                     IndexEntry::Vacant(v) => {
-                        v.insert((bounds, bound_params));
+                        v.insert((bounds, bound_params, implied_bounds));
                     }
                     IndexEntry::Occupied(mut o) => {
                         // we merge both bounds.
@@ -703,6 +709,13 @@ pub(crate) fn clean_generics<'tcx>(
                         for bound_param in bound_params {
                             if !o.get().1.contains(&bound_param) {
                                 o.get_mut().1.push(bound_param);
+                            }
+                        }
+                        // TODO: probably need to check if any of these are no longer implied
+                        // and have become explicit instead?
+                        for bound in implied_bounds {
+                            if !o.get().2.contains(&bound) {
+                                o.get_mut().2.push(bound);
                             }
                         }
                     }
@@ -769,10 +782,11 @@ pub(crate) fn clean_generics<'tcx>(
         params,
         where_predicates: bound_predicates
             .into_iter()
-            .map(|(ty, (bounds, bound_params))| WherePredicate::BoundPredicate {
+            .map(|(ty, (bounds, bound_params, implied_bounds))| WherePredicate::BoundPredicate {
                 ty,
                 bounds,
                 bound_params,
+                implied_bounds
             })
             .chain(
                 region_predicates
@@ -1139,7 +1153,7 @@ fn clean_poly_fn_sig<'tcx>(
     // function isn't async without needing to execute the query `asyncness` at
     // all which gives us a noticeable performance boost.
     if let Some(did) = did
-        && let Type::ImplTrait(_) = output
+        && let Type::ImplTrait { .. } = output
         && cx.tcx.asyncness(did).is_async()
     {
         output = output.sugared_async_return_type();
@@ -1215,20 +1229,23 @@ fn clean_trait_item<'tcx>(trait_item: &hir::TraitItem<'tcx>, cx: &mut DocContext
                 let bounds = bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect();
                 let item_type =
                     clean_middle_ty(ty::Binder::dummy(lower_ty(cx.tcx, default)), cx, None, None);
-                AssocTypeItem(
-                    Box::new(TypeAlias {
+                let implied_bounds = Vec::new();  // TODO
+                AssocTypeItem {
+                    ty: Box::new(TypeAlias {
                         type_: clean_ty(default, cx),
                         generics,
                         inner_type: None,
                         item_type: Some(item_type),
                     }),
                     bounds,
-                )
+                    implied_bounds,
+                }
             }
             hir::TraitItemKind::Type(bounds, None) => {
                 let generics = enter_impl_trait(cx, |cx| clean_generics(trait_item.generics, cx));
                 let bounds = bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect();
-                RequiredAssocTypeItem(generics, bounds)
+                let implied_bounds = Vec::new();  // TODO
+                RequiredAssocTypeItem { generics, bounds, implied_bounds }
             }
         };
         Item::from_def_id_and_parts(local_did, Some(trait_item.ident.name), inner, cx)
@@ -1260,15 +1277,17 @@ pub(crate) fn clean_impl_item<'tcx>(
                 let generics = clean_generics(impl_.generics, cx);
                 let item_type =
                     clean_middle_ty(ty::Binder::dummy(lower_ty(cx.tcx, hir_ty)), cx, None, None);
-                AssocTypeItem(
-                    Box::new(TypeAlias {
+                AssocTypeItem {
+                    ty: Box::new(TypeAlias {
                         type_,
                         generics,
                         inner_type: None,
                         item_type: Some(item_type),
                     }),
-                    Vec::new(),
-                )
+                    // Associated types inside `impl` blocks are not allowed to have bounds.
+                    bounds: Vec::new(),
+                    implied_bounds: Vec::new(),
+                }
             }
         };
 
@@ -1455,9 +1474,10 @@ pub(crate) fn clean_middle_assoc_item(assoc_item: &ty::AssocItem, cx: &mut DocCo
                     None => bounds.push(GenericBound::maybe_sized(cx)),
                 }
 
+                let implied_bounds = Vec::new(); // TODO
                 if tcx.defaultness(assoc_item.def_id).has_value() {
-                    AssocTypeItem(
-                        Box::new(TypeAlias {
+                    AssocTypeItem {
+                        ty: Box::new(TypeAlias {
                             type_: clean_middle_ty(
                                 ty::Binder::dummy(
                                     tcx.type_of(assoc_item.def_id).instantiate_identity(),
@@ -1471,13 +1491,14 @@ pub(crate) fn clean_middle_assoc_item(assoc_item: &ty::AssocItem, cx: &mut DocCo
                             item_type: None,
                         }),
                         bounds,
-                    )
+                        implied_bounds,
+                    }
                 } else {
-                    RequiredAssocTypeItem(generics, bounds)
+                    RequiredAssocTypeItem { generics, bounds, implied_bounds }
                 }
             } else {
-                AssocTypeItem(
-                    Box::new(TypeAlias {
+                AssocTypeItem {
+                    ty: Box::new(TypeAlias {
                         type_: clean_middle_ty(
                             ty::Binder::dummy(
                                 tcx.type_of(assoc_item.def_id).instantiate_identity(),
@@ -1492,8 +1513,9 @@ pub(crate) fn clean_middle_assoc_item(assoc_item: &ty::AssocItem, cx: &mut DocCo
                     }),
                     // Associated types inside trait or inherent impls are not allowed to have
                     // item bounds. Thus we don't attempt to move any bounds there.
-                    Vec::new(),
-                )
+                    bounds: Vec::new(),
+                    implied_bounds: Vec::new(),
+                }
             }
         }
     };
@@ -1631,7 +1653,7 @@ fn clean_qpath<'tcx>(hir_ty: &hir::Ty<'tcx>, cx: &mut DocContext<'tcx>) -> Type 
                     return new_ty;
                 }
                 if let Some(bounds) = cx.impl_trait_bounds.remove(&did.into()) {
-                    return ImplTrait(bounds);
+                    return ImplTrait { bounds, implied_bounds: Vec::new() }; // TODO
                 }
             }
 
@@ -1816,7 +1838,10 @@ pub(crate) fn clean_ty<'tcx>(ty: &hir::Ty<'tcx>, cx: &mut DocContext<'tcx>) -> T
         }
         TyKind::Tup(tys) => Tuple(tys.iter().map(|ty| clean_ty(ty, cx)).collect()),
         TyKind::OpaqueDef(ty) => {
-            ImplTrait(ty.bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect())
+            ImplTrait {
+                bounds: ty.bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect(),
+                implied_bounds: Vec::new(), // TODO
+            }
         }
         TyKind::Path(_) => clean_qpath(ty, cx),
         TyKind::TraitObject(bounds, lifetime) => {
@@ -2206,7 +2231,7 @@ pub(crate) fn clean_middle_ty<'tcx>(
 
         ty::Param(ref p) => {
             if let Some(bounds) = cx.impl_trait_bounds.remove(&p.index.into()) {
-                ImplTrait(bounds)
+                ImplTrait { bounds, implied_bounds: Vec::new() }  // TODO
             } else if p.name == kw::SelfUpper {
                 SelfTy
             } else {
@@ -2342,7 +2367,7 @@ fn clean_middle_opaque_bounds<'tcx>(
         ));
     }
 
-    ImplTrait(bounds)
+    ImplTrait { bounds, implied_bounds: Vec::new() }  // TODO
 }
 
 pub(crate) fn clean_field<'tcx>(field: &hir::FieldDef<'tcx>, cx: &mut DocContext<'tcx>) -> Item {
@@ -3204,6 +3229,7 @@ fn clean_bound_vars<'tcx>(
                     def_id,
                     kind: GenericParamDefKind::Type {
                         bounds: ThinVec::new(),
+                        implied_bounds: ThinVec::new(),  // TODO
                         default: None,
                         synthetic: false,
                     },
