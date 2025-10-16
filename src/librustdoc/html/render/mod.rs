@@ -1293,7 +1293,7 @@ fn render_assoc_item(
             cx,
         )
         .fmt(f),
-        clean::RequiredAssocTypeItem(generics, bounds) => assoc_type(
+        clean::RequiredAssocTypeItem { generics, bounds, .. } => assoc_type(
             item,
             generics,
             bounds,
@@ -1303,7 +1303,7 @@ fn render_assoc_item(
             cx,
         )
         .fmt(f),
-        clean::AssocTypeItem(ty, bounds) => assoc_type(
+        clean::AssocTypeItem { ty, bounds, .. } => assoc_type(
             item,
             &ty.generics,
             bounds,
@@ -1553,9 +1553,9 @@ fn render_deref_methods(
         .items
         .iter()
         .find_map(|item| match item.kind {
-            clean::AssocTypeItem(box ref t, _) => Some(match *t {
-                clean::TypeAlias { item_type: Some(ref type_), .. } => (type_, &t.type_),
-                _ => (&t.type_, &t.type_),
+            clean::AssocTypeItem { box ref ty, .. } => Some(match *ty {
+                clean::TypeAlias { item_type: Some(ref type_), .. } => (type_, &ty.type_),
+                _ => (&ty.type_, &ty.type_),
             }),
             _ => None,
         })
@@ -1693,7 +1693,7 @@ fn notable_traits_decl(ty: &clean::Type, cx: &Context<'_>) -> (String, String) {
         for (impl_, trait_did) in notable_impls {
             write!(f, "<div class=\"where\">{}</div>", impl_.print(false, cx))?;
             for it in &impl_.items {
-                let clean::AssocTypeItem(tydef, ..) = &it.kind else {
+                let clean::AssocTypeItem { ty: tydef, .. } = &it.kind else {
                     continue;
                 };
 
@@ -1940,7 +1940,7 @@ fn render_impl(
                         ),
                     )?;
                 }
-                clean::RequiredAssocTypeItem(generics, bounds) => {
+                clean::RequiredAssocTypeItem { generics, bounds, .. } => {
                     let source_id = format!("{item_type}.{name}");
                     let id = cx.derive_id(&source_id);
                     write!(
@@ -1967,7 +1967,7 @@ fn render_impl(
                         ),
                     )?;
                 }
-                clean::AssocTypeItem(tydef, _bounds) => {
+                clean::AssocTypeItem { ty: tydef, .. } => {
                     let source_id = format!("{item_type}.{name}");
                     let id = cx.derive_id(&source_id);
                     write!(
@@ -2027,7 +2027,7 @@ fn render_impl(
                     clean::MethodItem(..) | clean::RequiredMethodItem(_) => {
                         methods.push(trait_item)
                     }
-                    clean::RequiredAssocTypeItem(..) | clean::AssocTypeItem(..) => {
+                    clean::RequiredAssocTypeItem { .. } | clean::AssocTypeItem { .. } => {
                         assoc_types.push(trait_item)
                     }
                     clean::RequiredAssocConstItem(..)
@@ -2287,15 +2287,15 @@ fn render_impl_summary(
             write!(w, "{}", inner_impl.print(use_absolute, cx))?;
             if show_def_docs {
                 for it in &inner_impl.items {
-                    if let clean::AssocTypeItem(ref tydef, ref _bounds) = it.kind {
+                    if let clean::AssocTypeItem { ref ty, .. } = it.kind {
                         write!(
                             w,
                             "<div class=\"where\">  {};</div>",
                             assoc_type(
                                 it,
-                                &tydef.generics,
+                                &ty.generics,
                                 &[], // intentionally leaving out bounds
-                                Some(&tydef.type_),
+                                Some(&ty.type_),
                                 AssocItemLink::Anchor(None),
                                 0,
                                 cx,

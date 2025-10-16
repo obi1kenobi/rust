@@ -31,10 +31,11 @@ pub(crate) fn where_clauses(cx: &DocContext<'_>, clauses: ThinVec<WP>) -> ThinVe
 
     for clause in clauses {
         match clause {
-            WP::BoundPredicate { ty, bounds, bound_params } => {
-                let (b, p): &mut (Vec<_>, Vec<_>) = tybounds.entry(ty).or_default();
+            WP::BoundPredicate { ty, bounds, bound_params, implied_bounds } => {
+                let (b, p, i): &mut (Vec<_>, Vec<_>, Vec<_>) = tybounds.entry(ty).or_default();
                 b.extend(bounds);
                 p.extend(bound_params);
+                i.extend(implied_bounds);
             }
             WP::RegionPredicate { lifetime, bounds } => {
                 lifetimes.push((lifetime, bounds));
@@ -46,7 +47,7 @@ pub(crate) fn where_clauses(cx: &DocContext<'_>, clauses: ThinVec<WP>) -> ThinVe
     // Look for equality predicates on associated types that can be merged into
     // general bound predicates.
     equalities.retain(|(lhs, rhs)| {
-        let Some((bounds, _)) = tybounds.get_mut(&lhs.self_type) else { return true };
+        let Some((bounds, _, _)) = tybounds.get_mut(&lhs.self_type) else { return true };
         merge_bounds(cx, bounds, lhs.trait_.as_ref().unwrap().def_id(), lhs.assoc.clone(), rhs)
     });
 
@@ -55,10 +56,8 @@ pub(crate) fn where_clauses(cx: &DocContext<'_>, clauses: ThinVec<WP>) -> ThinVe
     clauses.extend(
         lifetimes.into_iter().map(|(lt, bounds)| WP::RegionPredicate { lifetime: lt, bounds }),
     );
-    clauses.extend(tybounds.into_iter().map(|(ty, (bounds, bound_params))| WP::BoundPredicate {
-        ty,
-        bounds,
-        bound_params,
+    clauses.extend(tybounds.into_iter().map(|(ty, (bounds, bound_params, implied_bounds))| {
+        WP::BoundPredicate { ty, bounds, bound_params, implied_bounds }
     }));
     clauses.extend(equalities.into_iter().map(|(lhs, rhs)| WP::EqPredicate { lhs, rhs }));
     clauses
@@ -161,6 +160,7 @@ pub(crate) fn sized_bounds(cx: &mut DocContext<'_>, generics: &mut clean::Generi
                 ty: clean::Type::Generic(param.name),
                 bounds: vec![clean::GenericBound::maybe_sized(cx)],
                 bound_params: Vec::new(),
+                implied_bounds: Vec::new(),
             })
         }
     }

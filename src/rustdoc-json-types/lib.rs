@@ -37,8 +37,8 @@ pub type FxHashMap<K, V> = HashMap<K, V>; // re-export for use in src/librustdoc
 // will instead cause conflicts. See #94591 for more. (This paragraph and the "Latest feature" line
 // are deliberately not in a doc comment, because they need not be in public docs.)
 //
-// Latest feature: Add `ItemKind::Attribute`.
-pub const FORMAT_VERSION: u32 = 56;
+// Latest feature: Add `implied_bounds`.
+pub const FORMAT_VERSION: u32 = 57;
 
 /// The root of the emitted JSON blob.
 ///
@@ -663,6 +663,19 @@ pub enum ItemEnum {
         /// }
         /// ```
         bounds: Vec<GenericBound>,
+        /// Additional bounds that are implied by the bounds that were syntactically present.
+        ///
+        /// For example:
+        /// ```rust
+        /// trait SizedAndStatic: Sized + 'static {}
+        ///
+        /// trait Example {
+        ///     type Item: SizedAndStatic;
+        ///     // Item: Sized and Item: 'static are implied bounds
+        /// }
+        /// ```
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        implied_bounds: Vec<GenericBound>,
         /// Inside a trait declaration, this is the default for the associated type, if provided.
         /// Inside an impl block, this is the type assigned to the associated type, and will always
         /// be present.
@@ -951,6 +964,9 @@ pub enum GenericParamDefKind {
         /// //             ^^^^^^^
         /// ```
         bounds: Vec<GenericBound>,
+        /// Additional bounds that are implied by other requirements.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        implied_bounds: Vec<GenericBound>,
         /// The default type for this parameter, if provided, e.g.
         ///
         /// ```rust
@@ -1020,6 +1036,17 @@ pub enum WherePredicate {
         /// //                                 ^^^^^^^^
         /// ```
         bounds: Vec<GenericBound>,
+        /// Additional bounds that are implied by other requirements.
+        ///
+        /// For example:
+        /// ```rust
+        /// trait SizedAndStatic: Sized + 'static {}
+        ///
+        /// fn f<T>(x: T) where T: SizedAndStatic {}
+        /// // T: Sized and T: 'static are implied bounds
+        /// ```
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        implied_bounds: Vec<GenericBound>,
         /// Used for Higher-Rank Trait Bounds (HRTBs)
         /// ```rust
         /// fn f<T>(x: T) where for<'a> &'a T: Iterator {}
@@ -1073,6 +1100,19 @@ pub enum GenericBound {
     Outlives(String),
     /// `use<'a, T>` precise-capturing bound syntax
     Use(Vec<PreciseCapturingArg>),
+}
+
+/// Bounds that are implied by other requirements.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ImpliedBounds {
+    /// The implied bounds.
+    pub bounds: Vec<GenericBound>,
+}
+
+impl ImpliedBounds {
+    pub fn is_empty(&self) -> bool {
+        self.bounds.is_empty()
+    }
 }
 
 /// A set of modifiers applied to a trait.
@@ -1170,7 +1210,13 @@ pub enum Type {
         __pat_unstable_do_not_use: String,
     },
     /// An opaque type that satisfies a set of bounds, `impl TraitA + TraitB + ...`
-    ImplTrait(Vec<GenericBound>),
+    ImplTrait {
+        /// The syntactic bounds specified on the `impl Trait`.
+        bounds: Vec<GenericBound>,
+        /// Additional bounds implied by the syntactic bounds, such as `Sized` or `'static`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        implied_bounds: Vec<GenericBound>,
+    },
     /// A type that's left to be inferred, `_`
     Infer,
     /// A raw pointer type, e.g. `*mut u32`, `*const u8`, etc.

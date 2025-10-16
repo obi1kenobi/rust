@@ -123,7 +123,12 @@ pub(crate) enum Ending {
 fn print_where_predicate(predicate: &clean::WherePredicate, cx: &Context<'_>) -> impl Display {
     fmt::from_fn(move |f| {
         match predicate {
-            clean::WherePredicate::BoundPredicate { ty, bounds, bound_params } => {
+            clean::WherePredicate::BoundPredicate {
+                ty,
+                bounds,
+                bound_params,
+                implied_bounds: _implied_bounds,
+            } => {
                 print_higher_ranked_params_with_space(bound_params, cx, "for").fmt(f)?;
                 ty.print(cx).fmt(f)?;
                 f.write_str(":")?;
@@ -977,7 +982,7 @@ fn fmt_type(
                 {
                     true
                 }
-                clean::ImplTrait(ref bounds) if bounds.len() > 1 => true,
+                clean::ImplTrait { ref bounds, implied_bounds: _ } if bounds.len() > 1 => true,
                 _ => false,
             };
             Wrapped::with_parens()
@@ -985,7 +990,7 @@ fn fmt_type(
                 .wrap_fn(|f| fmt_type(ty, f, use_absolute, cx))
                 .fmt(f)
         }
-        clean::ImplTrait(bounds) => {
+        clean::ImplTrait { bounds, implied_bounds: _ } => {
             f.write_str("impl ")?;
             print_generic_bounds(bounds, cx).fmt(f)
         }
