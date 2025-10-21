@@ -352,7 +352,8 @@ fn clean_where_predicate<'tcx>(
                 ty: clean_ty(wbp.bounded_ty, cx),
                 bounds: wbp.bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect(),
                 bound_params,
-                implied_bounds: Vec::new(), // TODO: populate based on `bounds`.
+                // Filled later by `populate_where_predicate_implied_bounds`.
+                implied_bounds: Vec::new(),
             }
         }
 
@@ -402,11 +403,13 @@ fn clean_poly_trait_predicate<'tcx>(
     }
 
     let poly_trait_ref = pred.map_bound(|pred| pred.trait_ref);
+    let bounds = vec![clean_poly_trait_ref_with_constraints(cx, poly_trait_ref, ThinVec::new())];
+    let implied_bounds = compute_implied_bounds_from_trait_predicate(cx, pred, &bounds);
     Some(WherePredicate::BoundPredicate {
         ty: clean_middle_ty(poly_trait_ref.self_ty(), cx, None, None),
-        bounds: vec![clean_poly_trait_ref_with_constraints(cx, poly_trait_ref, ThinVec::new())],
+        bounds,
         bound_params: Vec::new(),
-        implied_bounds: Vec::new(), // TODO
+        implied_bounds,
     })
 }
 
@@ -435,7 +438,10 @@ fn clean_type_outlives_predicate<'tcx>(
         bounds: vec![GenericBound::Outlives(
             clean_middle_region(lt, cx).expect("failed to clean lifetimes"),
         )],
-        implied_bounds: Vec::new(), // TODO: check this, and either replace or add an explanation for why it's correct
+        // A type outlives predicate is already fully explicit; further
+        // elaboration happens when we process the type's components, so
+        // no additional implied bounds are recorded here.
+        implied_bounds: Vec::new(),
         bound_params: Vec::new(),
     }
 }
@@ -547,7 +553,7 @@ fn clean_generic_param_def(
             (
                 def.name,
                 GenericParamDefKind::Type {
-                    bounds: ThinVec::new(), // These are filled in from the where-clauses.
+                    bounds: ThinVec::new(),         // These are filled in from the where-clauses.
                     implied_bounds: ThinVec::new(), // These are filled in based on `bounds`.
                     default: default.map(Box::new),
                     synthetic,
@@ -623,7 +629,8 @@ fn clean_generic_param<'tcx>(
             } else {
                 ThinVec::new()
             };
-            let implied_bounds = ThinVec::new(); // TODO
+            let implied_bounds =
+                compute_implied_bounds_for_type_param(cx, param.def_id.to_def_id(), &bounds);
             (
                 param.name.ident().name,
                 GenericParamDefKind::Type {
@@ -666,6 +673,350 @@ fn is_elided_lifetime(param: &hir::GenericParam<'_>) -> bool {
         param.kind,
         hir::GenericParamKind::Lifetime { kind: hir::LifetimeParamKind::Elided(_) }
     )
+}
+
+fn param_ty_from_def_id<'tcx>(tcx: TyCtxt<'tcx>, param_def_id: DefId) -> Option<(DefId, Ty<'tcx>)> {
+    let parent = tcx.opt_parent(param_def_id)?;
+    let generics = tcx.generics_of(parent);
+    let index = generics.param_def_id_to_index(tcx, param_def_id)?;
+    let param_ty = ty::ParamTy::new(index, tcx.item_name(param_def_id));
+    Some((parent, param_ty.to_ty(tcx)))
+}
+
+fn trait_bound_matches(
+    bound: &GenericBound,
+    trait_did: DefId,
+    mut matches_polarity: impl FnMut(hir::BoundPolarity) -> bool,
+) -> bool {
+    if let GenericBound::TraitBound(PolyTrait { trait_, .. }, modifiers) = bound {
+        trait_.def_id() == trait_did && matches_polarity(modifiers.polarity)
+    } else {
+        false
+    }
+}
+
+fn clause_bounds_for_subject<'tcx>(
+    cx: &mut DocContext<'tcx>,
+    clause: ty::Clause<'tcx>,
+    subject: Ty<'tcx>,
+) -> Option<Vec<GenericBound>> {
+    match clause.kind().skip_binder() {
+        ty::ClauseKind::Trait(pred) => {
+            if pred.trait_ref.self_ty() != subject {
+                return None;
+            }
+
+            if let Some(meta_sized) = cx.tcx.lang_items().meta_sized_trait()
+                && pred.trait_ref.def_id == meta_sized
+            {
+                return None;
+            }
+
+            let poly_trait_ref = clause.kind().map_bound(|kind| match kind {
+                ty::ClauseKind::Trait(pred) => pred.trait_ref,
+                _ => bug!("expected trait predicate"),
+            });
+
+            let path = clean_trait_ref_with_constraints(cx, poly_trait_ref, ThinVec::new());
+            let generic_params = clean_bound_vars(clause.kind().bound_vars(), cx);
+            Some(vec![GenericBound::TraitBound(
+                PolyTrait { trait_: path, generic_params },
+                hir::TraitBoundModifiers::NONE,
+            )])
+        }
+        ty::ClauseKind::TypeOutlives(ty::OutlivesPredicate(ty, region)) => {
+            if ty != subject {
+                return None;
+            }
+            let Some(lifetime) = clean_middle_region(region, cx) else {
+                return None;
+            };
+            Some(vec![GenericBound::Outlives(lifetime)])
+        }
+        _ => None,
+    }
+}
+
+fn all_bounds_for_subject<'tcx>(
+    cx: &mut DocContext<'tcx>,
+    env_def_id: DefId,
+    subject: Ty<'tcx>,
+) -> FxIndexSet<GenericBound> {
+    let param_env = cx.tcx.param_env(env_def_id);
+    let mut collected = FxIndexSet::default();
+
+    for clause in param_env.caller_bounds() {
+        if let Some(bounds) = clause_bounds_for_subject(cx, clause, subject) {
+            for bound in bounds {
+                collected.insert(bound);
+            }
+        }
+    }
+
+    collected
+}
+
+fn collect_bounds_from_param_env<'tcx>(
+    cx: &mut DocContext<'tcx>,
+    env_def_id: DefId,
+    subject: Ty<'tcx>,
+    explicit_bounds: &[GenericBound],
+) -> FxIndexSet<GenericBound> {
+    let explicit: FxIndexSet<_> = explicit_bounds.iter().cloned().collect();
+    let mut collected = all_bounds_for_subject(cx, env_def_id, subject);
+    collected.retain(|bound| !explicit.contains(bound));
+    collected
+}
+
+fn add_default_sized_if_needed(
+    cx: &mut DocContext<'_>,
+    accumulated: &mut FxIndexSet<GenericBound>,
+    explicit_bounds: &[GenericBound],
+) {
+    let Some(sized_did) = cx.tcx.lang_items().sized_trait() else { return };
+
+    let has_explicit_maybe = explicit_bounds.iter().any(|bound| {
+        trait_bound_matches(bound, sized_did, |polarity| {
+            matches!(polarity, hir::BoundPolarity::Maybe(_))
+        })
+    });
+    if has_explicit_maybe {
+        return;
+    }
+
+    let has_sized = explicit_bounds.iter().any(|bound| {
+        trait_bound_matches(bound, sized_did, |polarity| {
+            matches!(polarity, hir::BoundPolarity::Positive)
+        })
+    }) || accumulated.iter().any(|bound| {
+        trait_bound_matches(bound, sized_did, |polarity| {
+            matches!(polarity, hir::BoundPolarity::Positive)
+        })
+    });
+
+    if !has_sized {
+        accumulated.insert(GenericBound::sized(cx));
+    }
+}
+
+fn compute_implied_bounds_for_type_param<'tcx>(
+    cx: &mut DocContext<'tcx>,
+    param_def_id: DefId,
+    explicit_bounds: &[GenericBound],
+) -> ThinVec<GenericBound> {
+    if !cx.is_json_output() {
+        return ThinVec::new();
+    }
+
+    let Some((parent_def_id, subject)) = param_ty_from_def_id(cx.tcx, param_def_id) else {
+        return ThinVec::new();
+    };
+
+    let mut accumulated =
+        collect_bounds_from_param_env(cx, parent_def_id, subject, explicit_bounds);
+    add_default_sized_if_needed(cx, &mut accumulated, explicit_bounds);
+
+    accumulated.into_iter().collect()
+}
+
+fn populate_type_param_implied_bounds(cx: &mut DocContext<'_>, params: &mut [GenericParamDef]) {
+    for param in params {
+        if let GenericParamDefKind::Type { bounds, implied_bounds, .. } = &mut param.kind {
+            *implied_bounds = compute_implied_bounds_for_type_param(cx, param.def_id, bounds);
+        }
+    }
+}
+
+fn populate_where_predicate_implied_bounds(cx: &mut DocContext<'_>, generics: &mut Generics) {
+    if !cx.is_json_output() {
+        return;
+    }
+
+    let type_params: FxHashMap<_, _> = generics
+        .params
+        .iter()
+        .filter_map(|param| match param.kind {
+            GenericParamDefKind::Type { .. } => Some((param.name, param.def_id)),
+            _ => None,
+        })
+        .collect();
+
+    let mut cache: FxHashMap<DefId, FxIndexSet<GenericBound>> = FxHashMap::default();
+    let sized_did = cx.tcx.lang_items().sized_trait();
+
+    for predicate in &mut generics.where_predicates {
+        if let WherePredicate::BoundPredicate {
+            ty: Type::Generic(name),
+            bounds,
+            implied_bounds,
+            ..
+        } = predicate
+            && let Some(&param_def_id) = type_params.get(name)
+        {
+            let all_bounds = cache.entry(param_def_id).or_insert_with(|| {
+                if let Some((parent_def_id, subject)) = param_ty_from_def_id(cx.tcx, param_def_id) {
+                    all_bounds_for_subject(cx, parent_def_id, subject)
+                } else {
+                    FxIndexSet::default()
+                }
+            });
+
+            let mut derived = all_bounds.clone();
+
+            if let Some(sized_did) = sized_did {
+                if bounds.iter().any(|bound| {
+                    trait_bound_matches(bound, sized_did, |polarity| {
+                        matches!(polarity, hir::BoundPolarity::Maybe(_))
+                    })
+                }) {
+                    derived.retain(|bound| {
+                        !trait_bound_matches(bound, sized_did, |polarity| {
+                            matches!(polarity, hir::BoundPolarity::Positive)
+                        })
+                    });
+                }
+            }
+
+            *implied_bounds = derived.into_iter().collect();
+        }
+    }
+}
+
+fn compute_implied_bounds_for_assoc_type<'tcx>(
+    cx: &mut DocContext<'tcx>,
+    assoc_def_id: DefId,
+    explicit_bounds: &[GenericBound],
+) -> Vec<GenericBound> {
+    if !cx.is_json_output() {
+        return Vec::new();
+    }
+
+    let identity_args = ty::GenericArgs::identity_for_item(cx.tcx, assoc_def_id);
+    let alias_ty = ty::AliasTy::new(cx.tcx, assoc_def_id, identity_args);
+    let subject = Ty::new_alias(cx.tcx, ty::AliasTyKind::Projection, alias_ty);
+
+    let Some(parent_def_id) = cx.tcx.opt_parent(assoc_def_id) else {
+        return Vec::new();
+    };
+
+    let mut derived = all_bounds_for_subject(cx, parent_def_id, subject);
+
+    for (predicate, _) in
+        cx.tcx.explicit_item_bounds(assoc_def_id).iter_instantiated_copied(cx.tcx, identity_args)
+    {
+        if let Some(trait_pred) = predicate.as_trait_clause() {
+            for bound in compute_implied_bounds_from_trait_predicate(cx, trait_pred, &[]) {
+                derived.insert(bound);
+            }
+        } else if let Some(WherePredicate::BoundPredicate { bounds, .. }) =
+            clean_predicate(predicate, cx)
+        {
+            for bound in bounds {
+                derived.insert(bound);
+            }
+        }
+    }
+
+    for bound in explicit_bounds {
+        derived.shift_remove(bound);
+    }
+
+    ensure_default_sized_bound(cx, explicit_bounds, &mut derived);
+
+    derived.into_iter().collect()
+}
+
+fn compute_implied_bounds_for_opaque<'tcx>(
+    cx: &mut DocContext<'tcx>,
+    opaque_def_id: DefId,
+    explicit_bounds: &[GenericBound],
+) -> Vec<GenericBound> {
+    if !cx.is_json_output() {
+        // We only compute implied bounds for rustdoc JSON.
+        return Vec::new();
+    }
+
+    let identity_args = ty::GenericArgs::identity_for_item(cx.tcx, opaque_def_id);
+    let alias_ty = ty::AliasTy::new(cx.tcx, opaque_def_id, identity_args);
+    let subject = Ty::new_alias(cx.tcx, ty::AliasTyKind::Opaque, alias_ty);
+
+    let mut derived = all_bounds_for_subject(cx, opaque_def_id, subject);
+
+    for (predicate, _) in
+        cx.tcx.explicit_item_bounds(opaque_def_id).iter_instantiated_copied(cx.tcx, identity_args)
+    {
+        if let Some(trait_pred) = predicate.as_trait_clause() {
+            for bound in compute_implied_bounds_from_trait_predicate(cx, trait_pred, &[]) {
+                derived.insert(bound);
+            }
+        } else if let Some(WherePredicate::BoundPredicate { bounds, .. }) =
+            clean_predicate(predicate, cx)
+        {
+            for bound in bounds {
+                derived.insert(bound);
+            }
+        }
+    }
+
+    for bound in explicit_bounds {
+        derived.shift_remove(bound);
+    }
+
+    ensure_default_sized_bound(cx, explicit_bounds, &mut derived);
+
+    derived.into_iter().collect()
+}
+
+fn ensure_default_sized_bound(
+    cx: &mut DocContext<'_>,
+    explicit_bounds: &[GenericBound],
+    derived: &mut FxIndexSet<GenericBound>,
+) {
+    let Some(sized_did) = cx.tcx.lang_items().sized_trait() else { return };
+
+    let has_positive = explicit_bounds.iter().any(|bound| {
+        trait_bound_matches(bound, sized_did, |polarity| {
+            matches!(polarity, hir::BoundPolarity::Positive)
+        })
+    }) || derived.iter().any(|bound| {
+        trait_bound_matches(bound, sized_did, |polarity| {
+            matches!(polarity, hir::BoundPolarity::Positive)
+        })
+    });
+
+    if !has_positive {
+        derived.insert(GenericBound::sized(cx));
+    }
+}
+
+fn compute_implied_bounds_from_trait_predicate<'tcx>(
+    cx: &mut DocContext<'tcx>,
+    poly_trait_pred: ty::PolyTraitPredicate<'tcx>,
+    explicit_bounds: &[GenericBound],
+) -> Vec<GenericBound> {
+    if !cx.is_json_output() {
+        return Vec::new();
+    }
+
+    let trait_ref = poly_trait_pred.map_bound(|pred| pred.trait_ref);
+    let subject = trait_ref.skip_binder().self_ty();
+    let trait_def_id = trait_ref.def_id();
+
+    let explicit: FxIndexSet<_> = explicit_bounds.iter().cloned().collect();
+    let mut collected = FxIndexSet::default();
+
+    for &(clause, _) in cx.tcx.explicit_implied_predicates_of(trait_def_id).skip_binder() {
+        let instantiated = clause.instantiate_supertrait(cx.tcx, trait_ref);
+        if let Some(bounds) = clause_bounds_for_subject(cx, instantiated, subject) {
+            for bound in bounds {
+                if !explicit.contains(&bound) {
+                    collected.insert(bound);
+                }
+            }
+        }
+    }
+
+    collected.into_iter().collect()
 }
 
 pub(crate) fn clean_generics<'tcx>(
@@ -711,8 +1062,7 @@ pub(crate) fn clean_generics<'tcx>(
                                 o.get_mut().1.push(bound_param);
                             }
                         }
-                        // TODO: probably need to check if any of these are no longer implied
-                        // and have become explicit instead?
+                        // Merge newly discovered implied bounds while preserving deduplication.
                         for bound in implied_bounds {
                             if !o.get().2.contains(&bound) {
                                 o.get_mut().2.push(bound);
@@ -778,24 +1128,25 @@ pub(crate) fn clean_generics<'tcx>(
     }
     params.extend(impl_trait_params);
 
-    Generics {
-        params,
-        where_predicates: bound_predicates
-            .into_iter()
-            .map(|(ty, (bounds, bound_params, implied_bounds))| WherePredicate::BoundPredicate {
-                ty,
-                bounds,
-                bound_params,
-                implied_bounds
-            })
-            .chain(
-                region_predicates
-                    .into_iter()
-                    .map(|(lifetime, bounds)| WherePredicate::RegionPredicate { lifetime, bounds }),
-            )
-            .chain(eq_predicates)
-            .collect(),
-    }
+    let mut generics =
+        Generics {
+            params,
+            where_predicates: bound_predicates
+                .into_iter()
+                .map(|(ty, (bounds, bound_params, implied_bounds))| {
+                    WherePredicate::BoundPredicate { ty, bounds, bound_params, implied_bounds }
+                })
+                .chain(
+                    region_predicates.into_iter().map(|(lifetime, bounds)| {
+                        WherePredicate::RegionPredicate { lifetime, bounds }
+                    }),
+                )
+                .chain(eq_predicates)
+                .collect(),
+        };
+    populate_type_param_implied_bounds(cx, &mut generics.params);
+    populate_where_predicate_implied_bounds(cx, &mut generics);
+    generics
 }
 
 fn clean_ty_generics<'tcx>(cx: &mut DocContext<'tcx>, def_id: DefId) -> Generics {
@@ -930,6 +1281,8 @@ fn clean_ty_generics_inner<'tcx>(
     let mut generics = Generics { params, where_predicates };
     simplify::sized_bounds(cx, &mut generics);
     generics.where_predicates = simplify::where_clauses(cx, generics.where_predicates);
+    populate_type_param_implied_bounds(cx, &mut generics.params);
+    populate_where_predicate_implied_bounds(cx, &mut generics);
     generics
 }
 
@@ -1224,12 +1577,13 @@ fn clean_trait_item<'tcx>(trait_item: &hir::TraitItem<'tcx>, cx: &mut DocContext
                 let m = clean_function(cx, sig, trait_item.generics, ParamsSrc::Idents(idents));
                 RequiredMethodItem(m)
             }
-            hir::TraitItemKind::Type(bounds, Some(default)) => {
+            hir::TraitItemKind::Type(raw_bounds, Some(default)) => {
                 let generics = enter_impl_trait(cx, |cx| clean_generics(trait_item.generics, cx));
-                let bounds = bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect();
+                let bounds: Vec<GenericBound> =
+                    raw_bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect();
                 let item_type =
                     clean_middle_ty(ty::Binder::dummy(lower_ty(cx.tcx, default)), cx, None, None);
-                let implied_bounds = Vec::new();  // TODO
+                let implied_bounds = compute_implied_bounds_for_assoc_type(cx, local_did, &bounds);
                 AssocTypeItem {
                     ty: Box::new(TypeAlias {
                         type_: clean_ty(default, cx),
@@ -1241,10 +1595,11 @@ fn clean_trait_item<'tcx>(trait_item: &hir::TraitItem<'tcx>, cx: &mut DocContext
                     implied_bounds,
                 }
             }
-            hir::TraitItemKind::Type(bounds, None) => {
+            hir::TraitItemKind::Type(raw_bounds, None) => {
                 let generics = enter_impl_trait(cx, |cx| clean_generics(trait_item.generics, cx));
-                let bounds = bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect();
-                let implied_bounds = Vec::new();  // TODO
+                let bounds: Vec<GenericBound> =
+                    raw_bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect();
+                let implied_bounds = compute_implied_bounds_for_assoc_type(cx, local_did, &bounds);
                 RequiredAssocTypeItem { generics, bounds, implied_bounds }
             }
         };
@@ -1653,7 +2008,12 @@ fn clean_qpath<'tcx>(hir_ty: &hir::Ty<'tcx>, cx: &mut DocContext<'tcx>) -> Type 
                     return new_ty;
                 }
                 if let Some(bounds) = cx.impl_trait_bounds.remove(&did.into()) {
-                    return ImplTrait { bounds, implied_bounds: Vec::new() }; // TODO
+                    let mut implied: FxIndexSet<_> =
+                        compute_implied_bounds_for_type_param(cx, did, &bounds)
+                            .into_iter()
+                            .collect();
+                    ensure_default_sized_bound(cx, &bounds, &mut implied);
+                    return ImplTrait { bounds, implied_bounds: implied.into_iter().collect() };
                 }
             }
 
@@ -1838,10 +2198,11 @@ pub(crate) fn clean_ty<'tcx>(ty: &hir::Ty<'tcx>, cx: &mut DocContext<'tcx>) -> T
         }
         TyKind::Tup(tys) => Tuple(tys.iter().map(|ty| clean_ty(ty, cx)).collect()),
         TyKind::OpaqueDef(ty) => {
-            ImplTrait {
-                bounds: ty.bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect(),
-                implied_bounds: Vec::new(), // TODO
-            }
+            let bounds: Vec<self::types::GenericBound> =
+                ty.bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect();
+            let implied_bounds =
+                compute_implied_bounds_for_opaque(cx, ty.def_id.to_def_id(), &bounds);
+            ImplTrait { bounds, implied_bounds }
         }
         TyKind::Path(_) => clean_qpath(ty, cx),
         TyKind::TraitObject(bounds, lifetime) => {
@@ -2231,7 +2592,30 @@ pub(crate) fn clean_middle_ty<'tcx>(
 
         ty::Param(ref p) => {
             if let Some(bounds) = cx.impl_trait_bounds.remove(&p.index.into()) {
-                ImplTrait { bounds, implied_bounds: Vec::new() }  // TODO
+                let implied_bounds = if let Some(parent_def_id) = parent_def_id {
+                    let subject = p.to_ty(cx.tcx);
+                    let mut derived = all_bounds_for_subject(cx, parent_def_id, subject);
+                    for bound in &bounds {
+                        derived.shift_remove(bound);
+                    }
+                    if let Some(sized_did) = cx.tcx.lang_items().sized_trait() {
+                        if bounds.iter().any(|bound| {
+                            trait_bound_matches(bound, sized_did, |polarity| {
+                                matches!(polarity, hir::BoundPolarity::Maybe(_))
+                            })
+                        }) {
+                            derived.retain(|bound| {
+                                !trait_bound_matches(bound, sized_did, |polarity| {
+                                    matches!(polarity, hir::BoundPolarity::Positive)
+                                })
+                            });
+                        }
+                    }
+                    derived.into_iter().collect()
+                } else {
+                    Vec::new()
+                };
+                ImplTrait { bounds, implied_bounds }
             } else if p.name == kw::SelfUpper {
                 SelfTy
             } else {
@@ -2281,6 +2665,9 @@ fn clean_middle_opaque_bounds<'tcx>(
     impl_trait_def_id: DefId,
     args: ty::GenericArgsRef<'tcx>,
 ) -> Type {
+    // Whether the associated or opaque type requires that `Sized` be proven true
+    // at the definition site, and may be assumed true at usage sites.
+    // If this remains `false` after analysis, the type is *guaranteed* to be `?Sized`.
     let mut has_sized = false;
 
     let bounds: Vec<_> = cx
@@ -2367,7 +2754,8 @@ fn clean_middle_opaque_bounds<'tcx>(
         ));
     }
 
-    ImplTrait { bounds, implied_bounds: Vec::new() }  // TODO
+    let implied_bounds = compute_implied_bounds_for_opaque(cx, impl_trait_def_id, &bounds);
+    ImplTrait { bounds, implied_bounds }
 }
 
 pub(crate) fn clean_field<'tcx>(field: &hir::FieldDef<'tcx>, cx: &mut DocContext<'tcx>) -> Item {
@@ -3229,7 +3617,7 @@ fn clean_bound_vars<'tcx>(
                     def_id,
                     kind: GenericParamDefKind::Type {
                         bounds: ThinVec::new(),
-                        implied_bounds: ThinVec::new(),  // TODO
+                        implied_bounds: ThinVec::new(),
                         default: None,
                         synthetic: false,
                     },
