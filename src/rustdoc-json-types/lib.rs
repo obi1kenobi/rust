@@ -674,7 +674,7 @@ pub enum ItemEnum {
         ///     // Item: Sized and Item: 'static are implied bounds
         /// }
         /// ```
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(default)]
         implied_bounds: Vec<GenericBound>,
         /// Inside a trait declaration, this is the default for the associated type, if provided.
         /// Inside an impl block, this is the type assigned to the associated type, and will always
@@ -965,7 +965,7 @@ pub enum GenericParamDefKind {
         /// ```
         bounds: Vec<GenericBound>,
         /// Additional bounds that are implied by other requirements.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(default)]
         implied_bounds: Vec<GenericBound>,
         /// The default type for this parameter, if provided, e.g.
         ///
@@ -1045,7 +1045,7 @@ pub enum WherePredicate {
         /// fn f<T>(x: T) where T: SizedAndStatic {}
         /// // T: Sized and T: 'static are implied bounds
         /// ```
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(default)]
         implied_bounds: Vec<GenericBound>,
         /// Used for Higher-Rank Trait Bounds (HRTBs)
         /// ```rust
@@ -1201,7 +1201,7 @@ pub enum Type {
         /// The syntactic bounds specified on the `impl Trait`.
         bounds: Vec<GenericBound>,
         /// Additional bounds implied by the syntactic bounds, such as `Sized` or `'static`.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(default)]
         implied_bounds: Vec<GenericBound>,
     },
     /// A type that's left to be inferred, `_`
