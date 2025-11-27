@@ -17,7 +17,6 @@ pub trait IndirectStatic: NeedsStatic {}
 //@ !has "$.index[?(@.name=='example')].inner.function.generics.params[0].kind.type.implied_bounds[?(@.trait_bound.trait.path=='IndirectSized')]"
 //@ has "$.index[?(@.name=='example')].inner.function.generics.params[0].kind.type.implied_bounds[?(@.trait_bound.trait.path=='NeedsStatic')]"
 //@ has "$.index[?(@.name=='example')].inner.function.generics.params[0].kind.type.implied_bounds[?(@.trait_bound.trait.path=='NeedsSized')]"
-//@ has "$.index[?(@.name=='example')].inner.function.generics.params[0].kind.type.implied_bounds[?(@.trait_bound.trait.path=='Sized')]"
-//@ !has "$.index[?(@.name=='example')].inner.function.generics.params[0].kind.type.implied_bounds[?(@.trait_bound.modifier=='maybe')]"
+//@ has "$.index[?(@.name=='example')].inner.function.generics.params[0].kind.type.implied_bounds[?(@.trait_bound.trait.path=='Sized' && @.trait_bound.modifier=='none')]"
 //@ has "$.index[?(@.name=='example')].inner.function.generics.params[0].kind.type.implied_bounds[?(@.outlives==\"'static\")]"
 pub fn example<T: IndirectStatic + IndirectSized>(value: &T) {}

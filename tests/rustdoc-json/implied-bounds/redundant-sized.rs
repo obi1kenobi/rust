@@ -2,8 +2,7 @@
 //@ has "$.index[?(@.name=='redundant_where')]"
 
 //@ count "$.index[?(@.name=='redundant_at_def')].inner.function.generics.where_predicates[*]" 0
-//@ has   "$.index[?(@.name=='redundant_at_def')].inner.function.generics.params[0].kind.type.bounds[?(@.trait_bound.trait.path=='Sized')]"
-//@ !has  "$.index[?(@.name=='redundant_at_def')].inner.function.generics.params[0].kind.type.bounds[?(@.trait_bound.modifier=='maybe')]"
+//@ has   "$.index[?(@.name=='redundant_at_def')].inner.function.generics.params[0].kind.type.bounds[?(@.trait_bound.trait.path=='Sized' && @.trait_bound.modifier=='none')]"
 //@ count "$.index[?(@.name=='redundant_at_def')].inner.function.generics.params[0].kind.type.implied_bounds[*]" 0
 pub fn redundant_at_def<T: Sized>(_: T) {}
 
