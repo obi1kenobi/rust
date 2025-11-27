@@ -1293,7 +1293,7 @@ fn render_assoc_item(
             cx,
         )
         .fmt(f),
-        clean::RequiredAssocTypeItem { generics, bounds, .. } => assoc_type(
+        clean::RequiredAssocTypeItem(generics, bounds) => assoc_type(
             item,
             generics,
             bounds,
@@ -1303,7 +1303,7 @@ fn render_assoc_item(
             cx,
         )
         .fmt(f),
-        clean::AssocTypeItem { ty, bounds, .. } => assoc_type(
+        clean::AssocTypeItem(ty, bounds) => assoc_type(
             item,
             &ty.generics,
             bounds,
@@ -1552,7 +1552,7 @@ fn render_deref_methods(
         .items
         .iter()
         .find_map(|item| match item.kind {
-            clean::AssocTypeItem { box ref ty, .. } => Some(match *ty {
+            clean::AssocTypeItem(box ref ty, ..) => Some(match *ty {
                 clean::TypeAlias { item_type: Some(ref type_), .. } => (type_, &ty.type_),
                 _ => (&ty.type_, &ty.type_),
             }),
@@ -1693,7 +1693,7 @@ fn notable_traits_decl(ty: &clean::Type, cx: &Context<'_>) -> (String, String) {
         for (impl_, trait_did) in notable_impls {
             write!(f, "<div class=\"where\">{}</div>", print_impl(impl_, false, cx))?;
             for it in &impl_.items {
-                let clean::AssocTypeItem { ty: tydef, .. } = &it.kind else {
+                let clean::AssocTypeItem(tydef, ..) = &it.kind else {
                     continue;
                 };
 
@@ -1949,7 +1949,7 @@ fn render_impl(
                         ),
                     )?;
                 }
-                clean::RequiredAssocTypeItem { generics, bounds, .. } => {
+                clean::RequiredAssocTypeItem(generics, bounds) => {
                     let source_id = format!("{item_type}.{name}");
                     let id = cx.derive_id(&source_id);
                     write!(
@@ -1976,7 +1976,7 @@ fn render_impl(
                         ),
                     )?;
                 }
-                clean::AssocTypeItem { ty: tydef, .. } => {
+                clean::AssocTypeItem(tydef, ..) => {
                     let source_id = format!("{item_type}.{name}");
                     let id = cx.derive_id(&source_id);
                     write!(
@@ -2034,7 +2034,7 @@ fn render_impl(
             for impl_item in &impl_.items {
                 match impl_item.kind {
                     clean::MethodItem(..) | clean::RequiredMethodItem(_) => methods.push(impl_item),
-                    clean::RequiredAssocTypeItem { .. } | clean::AssocTypeItem { .. } => {
+                    clean::RequiredAssocTypeItem(..) | clean::AssocTypeItem(..) => {
                         assoc_types.push(impl_item)
                     }
                     clean::RequiredAssocConstItem(..)
@@ -2301,7 +2301,7 @@ fn render_impl_summary(
             write!(w, "{}", print_impl(inner_impl, use_absolute, cx))?;
             if show_def_docs {
                 for it in &inner_impl.items {
-                    if let clean::AssocTypeItem { ref ty, .. } = it.kind {
+                    if let clean::AssocTypeItem(ref ty, ..) = it.kind {
                         write!(
                             w,
                             "<div class=\"where\">  {};</div>",

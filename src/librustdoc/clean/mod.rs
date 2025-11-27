@@ -1265,22 +1265,22 @@ fn clean_trait_item<'tcx>(trait_item: &hir::TraitItem<'tcx>, cx: &mut DocContext
                     bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect();
                 let item_type =
                     clean_middle_ty(ty::Binder::dummy(lower_ty(cx.tcx, default)), cx, None, None);
-                AssocTypeItem {
-                    ty: Box::new(TypeAlias {
+                AssocTypeItem(
+                    Box::new(TypeAlias {
                         type_: clean_ty(default, cx),
                         generics,
                         inner_type: None,
                         item_type: Some(item_type),
                     }),
                     bounds,
-                }
+                )
             }
             hir::TraitItemKind::Type(bounds, None) => {
                 let generics =
                     enter_impl_trait(cx, |cx| clean_generics(trait_item.generics, local_did, cx));
                 let bounds: Vec<_> =
                     bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect();
-                RequiredAssocTypeItem { generics, bounds }
+                RequiredAssocTypeItem(generics, bounds)
             }
         };
         Item::from_def_id_and_parts(local_did, Some(trait_item.ident.name), inner, cx)
@@ -1312,16 +1312,16 @@ pub(crate) fn clean_impl_item<'tcx>(
                 let generics = clean_generics(impl_.generics, local_did, cx);
                 let item_type =
                     clean_middle_ty(ty::Binder::dummy(lower_ty(cx.tcx, hir_ty)), cx, None, None);
-                AssocTypeItem {
-                    ty: Box::new(TypeAlias {
+                AssocTypeItem(
+                    Box::new(TypeAlias {
                         type_,
                         generics,
                         inner_type: None,
                         item_type: Some(item_type),
                     }),
                     // Associated types inside `impl` blocks are not allowed to have bounds.
-                    bounds: Vec::new(),
-                }
+                    Vec::new(),
+                )
             }
         };
 
@@ -1510,8 +1510,8 @@ pub(crate) fn clean_middle_assoc_item(assoc_item: &ty::AssocItem, cx: &mut DocCo
                 }
 
                 if tcx.defaultness(assoc_item.def_id).has_value() {
-                    AssocTypeItem {
-                        ty: Box::new(TypeAlias {
+                    AssocTypeItem(
+                        Box::new(TypeAlias {
                             type_: clean_middle_ty(
                                 ty::Binder::dummy(
                                     tcx.type_of(assoc_item.def_id).instantiate_identity(),
@@ -1525,13 +1525,13 @@ pub(crate) fn clean_middle_assoc_item(assoc_item: &ty::AssocItem, cx: &mut DocCo
                             item_type: None,
                         }),
                         bounds,
-                    }
+                    )
                 } else {
-                    RequiredAssocTypeItem { generics, bounds }
+                    RequiredAssocTypeItem(generics, bounds)
                 }
             } else {
-                AssocTypeItem {
-                    ty: Box::new(TypeAlias {
+                AssocTypeItem(
+                    Box::new(TypeAlias {
                         type_: clean_middle_ty(
                             ty::Binder::dummy(
                                 tcx.type_of(assoc_item.def_id).instantiate_identity(),
@@ -1546,8 +1546,8 @@ pub(crate) fn clean_middle_assoc_item(assoc_item: &ty::AssocItem, cx: &mut DocCo
                     }),
                     // Associated types inside trait or inherent impls are not allowed to have
                     // item bounds. Thus we don't attempt to move any bounds there.
-                    bounds: Vec::new(),
-                }
+                    Vec::new(),
+                )
             }
         }
     };

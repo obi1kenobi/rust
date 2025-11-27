@@ -776,7 +776,7 @@ fn from_clean_item(item: &clean::Item, renderer: &JsonRenderer<'_>) -> ItemEnum 
             type_: ci.type_.into_json(renderer),
             value: Some(ci.kind.expr(renderer.tcx)),
         },
-        RequiredAssocTypeItem { generics, bounds } => {
+        RequiredAssocTypeItem(generics, bounds) => {
             let bounds_json: Vec<GenericBound> = bounds.into_json(renderer);
             ItemEnum::AssocType {
                 generics: renderer.generics_into_json(generics, owner_def_id),
@@ -785,7 +785,7 @@ fn from_clean_item(item: &clean::Item, renderer: &JsonRenderer<'_>) -> ItemEnum 
                 type_: None,
             }
         }
-        AssocTypeItem { ty, bounds } => {
+        AssocTypeItem(ty, bounds) => {
             let bounds_json: Vec<GenericBound> = bounds.into_json(renderer);
             ItemEnum::AssocType {
                 generics: renderer.generics_into_json(&ty.generics, owner_def_id),

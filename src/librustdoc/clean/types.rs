@@ -607,10 +607,10 @@ impl Item {
         self.type_() == ItemType::Variant
     }
     pub(crate) fn is_associated_type(&self) -> bool {
-        matches!(self.kind, AssocTypeItem { .. } | StrippedItem(box AssocTypeItem { .. }))
+        matches!(self.kind, AssocTypeItem(..) | StrippedItem(box AssocTypeItem(..)))
     }
     pub(crate) fn is_required_associated_type(&self) -> bool {
-        matches!(self.kind, RequiredAssocTypeItem { .. } | StrippedItem(box RequiredAssocTypeItem { .. }))
+        matches!(self.kind, RequiredAssocTypeItem(..) | StrippedItem(box RequiredAssocTypeItem(..)))
     }
     pub(crate) fn is_associated_const(&self) -> bool {
         matches!(self.kind, ProvidedAssocConstItem(..) | ImplAssocConstItem(..) | StrippedItem(box (ProvidedAssocConstItem(..) | ImplAssocConstItem(..))))
@@ -806,8 +806,8 @@ impl Item {
             RequiredAssocConstItem(..)
             | ProvidedAssocConstItem(..)
             | ImplAssocConstItem(..)
-            | AssocTypeItem { .. }
-            | RequiredAssocTypeItem { .. }
+            | AssocTypeItem(..)
+            | RequiredAssocTypeItem(..)
             | RequiredMethodItem(..)
             | MethodItem(..) => {
                 match tcx.associated_item(def_id).container {
@@ -881,15 +881,9 @@ pub(crate) enum ItemKind {
     /// A required associated type in a trait declaration.
     ///
     /// The bounds may be non-empty if there is a `where` clause.
-    RequiredAssocTypeItem {
-        generics: Generics,
-        bounds: Vec<GenericBound>,
-    },
+    RequiredAssocTypeItem(Generics, Vec<GenericBound>),
     /// An associated type in a trait impl or a provided one in a trait declaration.
-    AssocTypeItem {
-        ty: Box<TypeAlias>,
-        bounds: Vec<GenericBound>,
-    },
+    AssocTypeItem(Box<TypeAlias>, Vec<GenericBound>),
     /// An item that has been stripped by a rustdoc pass
     StrippedItem(Box<ItemKind>),
     /// This item represents a module with a `#[doc(keyword = "...")]` attribute which is used
@@ -935,8 +929,8 @@ impl ItemKind {
             | RequiredAssocConstItem(..)
             | ProvidedAssocConstItem(..)
             | ImplAssocConstItem(..)
-            | RequiredAssocTypeItem { .. }
-            | AssocTypeItem { .. }
+            | RequiredAssocTypeItem(..)
+            | AssocTypeItem(..)
             | StrippedItem(_)
             | KeywordItem
             | AttributeItem => [].iter(),

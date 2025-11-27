@@ -515,7 +515,7 @@ fn sidebar_deref_methods<'a>(
     debug!("found Deref: {impl_:?}");
     if let Some((target, real_target)) =
         impl_.inner_impl().items.iter().find_map(|item| match item.kind {
-            clean::AssocTypeItem { box ref ty, .. } => Some(match *ty {
+            clean::AssocTypeItem(box ref ty, ..) => Some(match *ty {
                 clean::TypeAlias { item_type: Some(ref type_), .. } => (type_, &ty.type_),
                 _ => (&ty.type_, &ty.type_),
             }),
