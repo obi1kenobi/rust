@@ -2043,7 +2043,7 @@ fn get_index_type_id(
         clean::Type::Pat(..)
         | clean::Generic(_)
         | clean::SelfTy
-        | clean::ImplTrait(_)
+        | clean::ImplTrait { .. }
         | clean::Infer
         | clean::UnsafeBinder(_) => None,
     }
@@ -2141,7 +2141,7 @@ fn simplify_fn_type<'a, 'tcx>(
                 RenderType { id: Some(RenderTypeId::Index(idx)), generics: None, bindings: None }
             })
         }
-        Type::ImplTrait(ref bounds) => {
+        Type::ImplTrait { ref bounds, .. } => {
             let type_bounds = bounds
                 .iter()
                 .filter_map(|bound| bound.get_trait_path())
@@ -2293,8 +2293,7 @@ fn simplify_fn_type<'a, 'tcx>(
                 && trait_.items.iter().any(|at| at.is_required_associated_type())
             {
                 for assoc_ty in &trait_.items {
-                    if let clean::ItemKind::RequiredAssocTypeItem(_generics, bounds) =
-                        &assoc_ty.kind
+                    if let clean::ItemKind::RequiredAssocTypeItem { bounds, .. } = &assoc_ty.kind
                         && let Some(name) = assoc_ty.name
                     {
                         let idx = -isize::try_from(rgen.len() + 1).unwrap();
