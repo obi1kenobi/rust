@@ -1552,7 +1552,7 @@ fn render_deref_methods(
         .items
         .iter()
         .find_map(|item| match item.kind {
-            clean::AssocTypeItem(box ref t, ..) => Some(match *t {
+            clean::AssocTypeItem(box ref t, _) => Some(match *t {
                 clean::TypeAlias { item_type: Some(ref type_), .. } => (type_, &t.type_),
                 _ => (&t.type_, &t.type_),
             }),
@@ -1976,7 +1976,7 @@ fn render_impl(
                         ),
                     )?;
                 }
-                clean::AssocTypeItem(tydef, _) => {
+                clean::AssocTypeItem(tydef, _bounds) => {
                     let source_id = format!("{item_type}.{name}");
                     let id = cx.derive_id(&source_id);
                     write!(

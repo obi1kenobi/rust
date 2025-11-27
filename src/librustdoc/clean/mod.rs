@@ -695,11 +695,11 @@ pub(crate) fn clean_generics<'tcx>(
         .iter()
         .filter(|param| is_impl_trait(param))
         .map(|param| {
-            let mut param = clean_generic_param(cx, Some(gens), param);
-            match &mut param.kind {
+            let param = clean_generic_param(cx, Some(gens), param);
+            match param.kind {
                 GenericParamDefKind::Lifetime { .. } => unreachable!(),
-                GenericParamDefKind::Type { bounds, synthetic, .. } => {
-                    debug_assert!(*synthetic);
+                GenericParamDefKind::Type { ref bounds, ref synthetic, .. } => {
+                    debug_assert!(*synthetic, "non-synthetic generic for impl trait: {param:?}");
                     let param_def_id = param.def_id;
                     cx.impl_trait_bounds.insert(
                         param_def_id.into(),
@@ -814,17 +814,11 @@ pub(crate) fn clean_generics<'tcx>(
 }
 
 fn clean_ty_generics<'tcx>(cx: &mut DocContext<'tcx>, def_id: DefId) -> Generics {
-    clean_ty_generics_inner(
-        cx,
-        def_id,
-        cx.tcx.generics_of(def_id),
-        cx.tcx.explicit_predicates_of(def_id),
-    )
+    clean_ty_generics_inner(cx, cx.tcx.generics_of(def_id), cx.tcx.explicit_predicates_of(def_id))
 }
 
 fn clean_ty_generics_inner<'tcx>(
     cx: &mut DocContext<'tcx>,
-    _owner_def_id: DefId,
     gens: &ty::Generics,
     preds: ty::GenericPredicates<'tcx>,
 ) -> Generics {
@@ -1051,12 +1045,7 @@ fn clean_fn_or_proc_macro<'tcx>(
     match macro_kind {
         Some(kind) => clean_proc_macro(item, name, kind, cx),
         None => {
-            let mut func = clean_function(
-                cx,
-                sig,
-                generics,
-                ParamsSrc::Body(body_id),
-            );
+            let mut func = clean_function(cx, sig, generics, ParamsSrc::Body(body_id));
             clean_fn_decl_legacy_const_generics(&mut func, attrs);
             FunctionItem(func)
         }
@@ -1228,37 +1217,26 @@ fn clean_trait_item<'tcx>(trait_item: &hir::TraitItem<'tcx>, cx: &mut DocContext
         let inner = match trait_item.kind {
             hir::TraitItemKind::Const(ty, Some(default)) => {
                 ProvidedAssocConstItem(Box::new(Constant {
-                    generics: enter_impl_trait(cx, |cx| {
-                        clean_generics(trait_item.generics, cx)
-                    }),
+                    generics: enter_impl_trait(cx, |cx| clean_generics(trait_item.generics, cx)),
                     kind: clean_const_item_rhs(default, local_did),
                     type_: clean_ty(ty, cx),
                 }))
             }
             hir::TraitItemKind::Const(ty, None) => {
-                let generics =
-                    enter_impl_trait(cx, |cx| clean_generics(trait_item.generics, cx));
+                let generics = enter_impl_trait(cx, |cx| clean_generics(trait_item.generics, cx));
                 RequiredAssocConstItem(generics, Box::new(clean_ty(ty, cx)))
             }
             hir::TraitItemKind::Fn(ref sig, hir::TraitFn::Provided(body)) => {
-                let m =
-                    clean_function(cx, sig, trait_item.generics, ParamsSrc::Body(body));
+                let m = clean_function(cx, sig, trait_item.generics, ParamsSrc::Body(body));
                 MethodItem(m, None)
             }
             hir::TraitItemKind::Fn(ref sig, hir::TraitFn::Required(idents)) => {
-                let m = clean_function(
-                    cx,
-                    sig,
-                    trait_item.generics,
-                    ParamsSrc::Idents(idents),
-                );
+                let m = clean_function(cx, sig, trait_item.generics, ParamsSrc::Idents(idents));
                 RequiredMethodItem(m)
             }
             hir::TraitItemKind::Type(bounds, Some(default)) => {
-                let generics =
-                    enter_impl_trait(cx, |cx| clean_generics(trait_item.generics, cx));
-                let bounds: Vec<_> =
-                    bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect();
+                let generics = enter_impl_trait(cx, |cx| clean_generics(trait_item.generics, cx));
+                let bounds = bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect();
                 let item_type =
                     clean_middle_ty(ty::Binder::dummy(lower_ty(cx.tcx, default)), cx, None, None);
                 AssocTypeItem(
@@ -1272,10 +1250,8 @@ fn clean_trait_item<'tcx>(trait_item: &hir::TraitItem<'tcx>, cx: &mut DocContext
                 )
             }
             hir::TraitItemKind::Type(bounds, None) => {
-                let generics =
-                    enter_impl_trait(cx, |cx| clean_generics(trait_item.generics, cx));
-                let bounds: Vec<_> =
-                    bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect();
+                let generics = enter_impl_trait(cx, |cx| clean_generics(trait_item.generics, cx));
+                let bounds = bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect();
                 RequiredAssocTypeItem(generics, bounds)
             }
         };
@@ -1427,7 +1403,6 @@ pub(crate) fn clean_middle_assoc_item(assoc_item: &ty::AssocItem, cx: &mut DocCo
             }
             let mut generics = clean_ty_generics_inner(
                 cx,
-                assoc_item.def_id,
                 tcx.generics_of(assoc_item.def_id),
                 ty::GenericPredicates { parent: None, predicates },
             );
