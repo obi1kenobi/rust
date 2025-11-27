@@ -2033,9 +2033,7 @@ fn render_impl(
         if !impl_.is_negative_trait_impl() {
             for impl_item in &impl_.items {
                 match impl_item.kind {
-                    clean::MethodItem(..) | clean::RequiredMethodItem(_) => {
-                        methods.push(impl_item)
-                    }
+                    clean::MethodItem(..) | clean::RequiredMethodItem(_) => methods.push(impl_item),
                     clean::RequiredAssocTypeItem { .. } | clean::AssocTypeItem { .. } => {
                         assoc_types.push(impl_item)
                     }

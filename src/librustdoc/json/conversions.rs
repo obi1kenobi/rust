@@ -4,17 +4,22 @@
 
 use rustc_abi::ExternAbi;
 use rustc_ast::ast;
-use rustc_data_structures::fx::FxHashSet;
+use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::thin_vec::ThinVec;
 use rustc_hir as hir;
 use rustc_hir::attrs::{self, DeprecatedSince, DocAttribute, DocInline, HideOrShow};
-use rustc_hir::def::CtorKind;
+use rustc_hir::def::{CtorKind, DefKind};
 use rustc_hir::def_id::DefId;
-use rustc_hir::{HeaderSafety, Safety};
+use rustc_hir::{HeaderSafety, LangItem, Safety};
+use rustc_infer::infer::region_constraints::GenericKind;
 use rustc_metadata::rendered_const;
 use rustc_middle::ty::TyCtxt;
-use rustc_middle::{bug, ty};
+use rustc_middle::bug;
+use rustc_middle::ty::{self, AliasTy, ParamTy, Ty, TyCtxt, TypingMode};
 use rustc_span::{Pos, Symbol, kw, sym};
+use rustc_trait_selection::infer::TyCtxtInferExt;
+use rustc_trait_selection::infer::outlives::env::OutlivesEnvironment;
+use rustc_trait_selection::regions::OutlivesEnvironmentBuildExt;
 use rustdoc_json_types::*;
 
 use crate::clean::{self, ItemId};
@@ -22,7 +27,7 @@ use crate::formats::item_type::ItemType;
 use crate::json::JsonRenderer;
 use crate::passes::collect_intra_doc_links::UrlFragment;
 
-impl JsonRenderer<'_> {
+impl<'tcx> JsonRenderer<'tcx> {
     pub(super) fn convert_item(&self, item: &clean::Item) -> Option<Item> {
         let deprecation = item.deprecation(self.tcx);
         let links = self
@@ -99,6 +104,392 @@ impl JsonRenderer<'_> {
                     .then(|| self.id_from_item(i))
             })
             .collect()
+    }
+
+    fn sized_trait_id(&self) -> Option<Id> {
+        self.tcx.lang_items().sized_trait().map(|did| self.id_from_item_default(did.into()))
+    }
+
+    fn is_sized_bound(&self, bound: &GenericBound) -> bool {
+        let Some(sized_id) = self.sized_trait_id() else { return false };
+        matches!(
+            bound,
+            GenericBound::TraitBound { trait_: Path { id, .. }, modifier, .. }
+                if *id == sized_id && *modifier != TraitBoundModifier::Maybe
+        )
+    }
+
+    fn is_maybe_sized_bound(&self, bound: &GenericBound) -> bool {
+        let Some(sized_id) = self.sized_trait_id() else { return false };
+        matches!(
+            bound,
+            GenericBound::TraitBound { trait_: Path { id, .. }, modifier, .. }
+                if *id == sized_id && *modifier == TraitBoundModifier::Maybe
+        )
+    }
+
+    fn clause_targets_ty(&self, clause: ty::Clause<'tcx>, target: Ty<'tcx>) -> bool {
+        if let Some(trait_clause) = clause.as_trait_clause() {
+            trait_clause.self_ty().skip_binder() == target
+        } else if let Some(type_outlives) = clause.as_type_outlives_clause() {
+            type_outlives.skip_binder().0 == target
+        } else {
+            false
+        }
+    }
+
+    fn clause_to_generic_bound(
+        &self,
+        clause: ty::Clause<'tcx>,
+        explicit_trait_bounds: &FxHashSet<(Id, TraitBoundModifier)>,
+    ) -> Option<GenericBound> {
+        if let Some(trait_clause) = clause.as_trait_clause() {
+            let def_id = trait_clause.def_id();
+            let modifier = TraitBoundModifier::None;
+            let id = self.id_from_item_default(def_id.into());
+            if explicit_trait_bounds.contains(&(id, modifier)) {
+                return None;
+            }
+            match self.tcx.as_lang_item(def_id) {
+                None => {}
+                Some(
+                    LangItem::Sized
+                    | LangItem::Clone
+                    | LangItem::Copy
+                    | LangItem::Sync
+                    | LangItem::Drop
+                    | LangItem::Add
+                    | LangItem::Sub
+                    | LangItem::Mul
+                    | LangItem::Div
+                    | LangItem::Rem
+                    | LangItem::Neg
+                    | LangItem::Not
+                    | LangItem::BitXor
+                    | LangItem::BitAnd
+                    | LangItem::BitOr
+                    | LangItem::Shl
+                    | LangItem::Shr
+                    | LangItem::AddAssign
+                    | LangItem::SubAssign
+                    | LangItem::MulAssign
+                    | LangItem::DivAssign
+                    | LangItem::RemAssign
+                    | LangItem::BitXorAssign
+                    | LangItem::BitAndAssign
+                    | LangItem::BitOrAssign
+                    | LangItem::ShlAssign
+                    | LangItem::ShrAssign
+                    | LangItem::Index
+                    | LangItem::IndexMut
+                    | LangItem::Deref
+                    | LangItem::DerefMut
+                    | LangItem::Fn
+                    | LangItem::FnMut
+                    | LangItem::FnOnce
+                    | LangItem::AsyncFn
+                    | LangItem::AsyncFnMut
+                    | LangItem::AsyncFnOnce
+                    | LangItem::Iterator
+                    | LangItem::FusedIterator
+                    | LangItem::Future
+                    | LangItem::Unpin
+                    | LangItem::PartialEq
+                    | LangItem::PartialOrd,
+                ) => {}
+                Some(_) => return None,
+            }
+
+            let path = Path { path: self.tcx.item_name(def_id).to_string(), id, args: None };
+
+            return Some(GenericBound::TraitBound {
+                trait_: path,
+                generic_params: Vec::new(),
+                modifier,
+            });
+        }
+
+        if let Some(type_outlives) = clause.as_type_outlives_clause() {
+            let ty::OutlivesPredicate(_, region) = type_outlives.skip_binder();
+            if let Some(name) = region.get_name(self.tcx) {
+                return Some(GenericBound::Outlives(name.to_string()));
+            }
+        }
+
+        None
+    }
+
+    fn compute_implied_bounds_for_ty(
+        &self,
+        target_ty: Ty<'tcx>,
+        clauses: &[ty::Clause<'tcx>],
+        implicitly_sized: bool,
+        explicit_bounds: &[GenericBound],
+    ) -> Vec<GenericBound> {
+        let mut seen: FxHashSet<_> = explicit_bounds.iter().cloned().collect();
+        let explicit_trait_bounds: FxHashSet<_> = explicit_bounds
+            .iter()
+            .filter_map(|bound| match bound {
+                GenericBound::TraitBound { trait_, modifier, .. } => Some((trait_.id, *modifier)),
+                _ => None,
+            })
+            .collect();
+        let mut implied_bounds = Vec::new();
+
+        let mut added_sized_bound = false;
+        for clause in clauses {
+            if !self.clause_targets_ty(*clause, target_ty) {
+                continue;
+            }
+
+            if let Some(bound) = self.clause_to_generic_bound(*clause, &explicit_trait_bounds) {
+                if self.is_sized_bound(&bound) {
+                    added_sized_bound = true;
+                }
+
+                if seen.insert(bound.clone()) {
+                    implied_bounds.push(bound);
+                }
+            }
+        }
+
+        if implicitly_sized && !added_sized_bound {
+            if let (Some(sized_id), Some(sized_def_id)) =
+                (self.sized_trait_id(), self.tcx.lang_items().sized_trait())
+            {
+                let sized_bound = GenericBound::TraitBound {
+                    trait_: Path {
+                        path: self.tcx.item_name(sized_def_id).to_string(),
+                        id: sized_id,
+                        args: None,
+                    },
+                    generic_params: Vec::new(),
+                    modifier: TraitBoundModifier::None,
+                };
+                if seen.insert(sized_bound.clone()) {
+                    implied_bounds.push(sized_bound);
+                }
+            }
+        }
+
+        implied_bounds
+    }
+
+    fn fn_param_used_directly(&self, owner_def_id: DefId, target_ty: Ty<'tcx>) -> bool {
+        let is_function = matches!(self.tcx.def_kind(owner_def_id), DefKind::Fn | DefKind::AssocFn);
+        if !is_function {
+            return false;
+        }
+
+        let sig = self.tcx.fn_sig(owner_def_id).instantiate_identity();
+        let sig = sig.skip_binder();
+        sig.inputs().iter().any(|ty| *ty == target_ty) || sig.output() == target_ty
+    }
+
+    fn param_ty_for_param(&self, owner_def_id: DefId, param_def_id: DefId) -> Option<Ty<'tcx>> {
+        let generics = self.tcx.generics_of(owner_def_id);
+        let index = generics.param_def_id_to_index(self.tcx, param_def_id)?;
+        let param_def = generics.param_at(index as usize, self.tcx);
+        match param_def.kind {
+            ty::GenericParamDefKind::Type { .. } => {
+                Some(ParamTy::for_def(param_def).to_ty(self.tcx))
+            }
+            _ => None,
+        }
+    }
+
+    fn implied_outlives_bounds_for_param(
+        &self,
+        owner_def_id: DefId,
+        param_ty: ParamTy,
+    ) -> Vec<GenericBound> {
+        let Some(local_def_id) = owner_def_id.as_local() else {
+            return Vec::new();
+        };
+
+        let assumed_wf = self.tcx.assumed_wf_types(local_def_id);
+        if assumed_wf.is_empty() {
+            return Vec::new();
+        }
+
+        let param_env = self.tcx.param_env(owner_def_id);
+        let infcx = self.tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+        let env = OutlivesEnvironment::new(
+            &infcx,
+            local_def_id,
+            param_env,
+            assumed_wf.iter().map(|(ty, _)| *ty),
+        );
+
+        env.region_bound_pairs()
+            .iter()
+            .filter_map(|predicate| match predicate {
+                ty::OutlivesPredicate(GenericKind::Param(param), region)
+                    if param.index == param_ty.index =>
+                {
+                    region.get_name(self.tcx).map(|name| GenericBound::Outlives(name.to_string()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn implied_bounds_for_type_param(
+        &self,
+        owner_def_id: DefId,
+        param_def_id: DefId,
+        explicit_bounds: &[GenericBound],
+    ) -> Vec<GenericBound> {
+        let Some(target_ty) = self.param_ty_for_param(owner_def_id, param_def_id) else {
+            return Vec::new();
+        };
+
+        let clauses = self.tcx.param_env(owner_def_id).caller_bounds();
+        let allows_unsized = explicit_bounds.iter().any(|bound| self.is_maybe_sized_bound(bound));
+        let implicitly_sized =
+            !allows_unsized || self.fn_param_used_directly(owner_def_id, target_ty);
+
+        let mut implied_bounds = self.compute_implied_bounds_for_ty(
+            target_ty,
+            clauses.as_slice(),
+            implicitly_sized,
+            explicit_bounds,
+        );
+
+        let ty::Param(param_ty) = target_ty.kind() else {
+            return implied_bounds;
+        };
+
+        let extra_bounds = self.implied_outlives_bounds_for_param(owner_def_id, *param_ty);
+        if !extra_bounds.is_empty() {
+            let mut seen: FxHashSet<_> = explicit_bounds.iter().cloned().collect();
+            seen.extend(implied_bounds.iter().cloned());
+            for bound in extra_bounds {
+                if seen.insert(bound.clone()) {
+                    implied_bounds.push(bound);
+                }
+            }
+        }
+
+        implied_bounds
+    }
+
+    fn implied_bounds_for_assoc_type(
+        &self,
+        assoc_def_id: DefId,
+        explicit_bounds: &[GenericBound],
+    ) -> Vec<GenericBound> {
+        let assoc_item = self.tcx.associated_item(assoc_def_id);
+        if !matches!(assoc_item.container, ty::AssocContainer::Trait) {
+            return Vec::new();
+        }
+
+        let args = ty::GenericArgs::identity_for_item(self.tcx, assoc_def_id);
+        let target_ty = Ty::new_alias(
+            self.tcx,
+            ty::Projection,
+            AliasTy::new_from_args(self.tcx, assoc_def_id, args),
+        );
+        let clauses = self.tcx.item_bounds(assoc_def_id).instantiate(self.tcx, args);
+        self.compute_implied_bounds_for_ty(target_ty, &clauses, true, explicit_bounds)
+    }
+
+    fn implied_bounds_for_impl_trait(
+        &self,
+        origin: &clean::ImplTraitOrigin,
+        explicit_bounds: &[GenericBound],
+    ) -> Vec<GenericBound> {
+        match origin {
+            clean::ImplTraitOrigin::Param { def_id } => {
+                let Some(owner_def_id) = self.tcx.opt_parent(*def_id) else { return Vec::new() };
+                self.implied_bounds_for_type_param(owner_def_id, *def_id, explicit_bounds)
+            }
+            clean::ImplTraitOrigin::Opaque { def_id, implicitly_sized } => {
+                let args = ty::GenericArgs::identity_for_item(self.tcx, *def_id);
+                let target_ty = Ty::new_alias(
+                    self.tcx,
+                    ty::Opaque,
+                    AliasTy::new_from_args(self.tcx, *def_id, args),
+                );
+                let clauses = self.tcx.item_bounds(*def_id).instantiate(self.tcx, args);
+                self.compute_implied_bounds_for_ty(
+                    target_ty,
+                    &clauses,
+                    *implicitly_sized,
+                    explicit_bounds,
+                )
+            }
+        }
+    }
+
+    fn generics_into_json(&self, generics: &clean::Generics, owner_def_id: DefId) -> Generics {
+        let mut param_by_name = FxHashMap::default();
+        let mut param_bounds: FxHashMap<_, Vec<GenericBound>> = FxHashMap::default();
+        let mut explicit_bounds: FxHashMap<_, Vec<GenericBound>> = FxHashMap::default();
+
+        for param in &generics.params {
+            if let clean::GenericParamDefKind::Type { bounds, .. } = &param.kind {
+                let bounds_json: Vec<GenericBound> = bounds.into_json(self);
+                param_by_name.insert(param.name, param.def_id);
+                explicit_bounds.entry(param.def_id).or_default().extend(bounds_json.clone());
+                param_bounds.insert(param.def_id, bounds_json);
+            }
+        }
+
+        for predicate in &generics.where_predicates {
+            if let clean::WherePredicate::BoundPredicate {
+                ty: clean::Type::Generic(name),
+                bounds,
+                ..
+            } = predicate
+                && let Some(def_id) = param_by_name.get(name)
+            {
+                let where_bounds: Vec<GenericBound> = bounds.into_json(self);
+                explicit_bounds.entry(*def_id).or_default().extend(where_bounds);
+            }
+        }
+
+        let params = generics
+            .params
+            .iter()
+            .map(|param| match &param.kind {
+                clean::GenericParamDefKind::Lifetime { outlives } => GenericParamDef {
+                    name: param.name.to_string(),
+                    kind: GenericParamDefKind::Lifetime { outlives: outlives.into_json(self) },
+                },
+                clean::GenericParamDefKind::Type { bounds, default, synthetic } => {
+                    let bounds_json = param_bounds
+                        .remove(&param.def_id)
+                        .unwrap_or_else(|| bounds.into_json(self));
+                    let explicit_bounds = explicit_bounds
+                        .remove(&param.def_id)
+                        .unwrap_or_else(|| bounds_json.clone());
+                    let implied_bounds = self.implied_bounds_for_type_param(
+                        owner_def_id,
+                        param.def_id,
+                        &explicit_bounds,
+                    );
+                    GenericParamDef {
+                        name: param.name.to_string(),
+                        kind: GenericParamDefKind::Type {
+                            bounds: bounds_json,
+                            implied_bounds,
+                            default: default.into_json(self),
+                            is_synthetic: *synthetic,
+                        },
+                    }
+                }
+                clean::GenericParamDefKind::Const { ty, default } => GenericParamDef {
+                    name: param.name.to_string(),
+                    kind: GenericParamDefKind::Const {
+                        type_: ty.into_json(self),
+                        default: default.as_ref().map(|x| x.as_ref().clone()),
+                    },
+                },
+            })
+            .collect();
+
+        Generics { params, where_predicates: generics.where_predicates.into_json(self) }
     }
 }
 
@@ -274,36 +665,95 @@ fn from_clean_item(item: &clean::Item, renderer: &JsonRenderer<'_>) -> ItemEnum 
     let name = item.name;
     let is_crate = item.is_crate();
     let header = item.fn_header(renderer.tcx);
+    let owner_def_id = match item.item_id {
+        ItemId::DefId(did) => did,
+        ItemId::Auto { trait_, .. } => trait_,
+        ItemId::Blanket { impl_id, .. } => impl_id,
+    };
 
     match &item.inner.kind {
         ModuleItem(m) => {
             ItemEnum::Module(Module { is_crate, items: renderer.ids(&m.items), is_stripped: false })
         }
         ImportItem(i) => ItemEnum::Use(i.into_json(renderer)),
-        StructItem(s) => ItemEnum::Struct(s.into_json(renderer)),
-        UnionItem(u) => ItemEnum::Union(u.into_json(renderer)),
+        StructItem(s) => {
+            let has_stripped_fields = s.has_stripped_entries();
+            let kind = match s.ctor_kind {
+                Some(CtorKind::Fn) => StructKind::Tuple(renderer.ids_keeping_stripped(&s.fields)),
+                Some(CtorKind::Const) => {
+                    assert!(s.fields.is_empty());
+                    StructKind::Unit
+                }
+                None => StructKind::Plain { fields: renderer.ids(&s.fields), has_stripped_fields },
+            };
+
+            ItemEnum::Struct(Struct {
+                kind,
+                generics: renderer.generics_into_json(&s.generics, owner_def_id),
+                impls: Vec::new(),
+            })
+        }
+        UnionItem(u) => {
+            let has_stripped_fields = u.has_stripped_entries();
+            ItemEnum::Union(Union {
+                generics: renderer.generics_into_json(&u.generics, owner_def_id),
+                has_stripped_fields,
+                fields: renderer.ids(&u.fields),
+                impls: Vec::new(),
+            })
+        }
         StructFieldItem(f) => ItemEnum::StructField(f.into_json(renderer)),
-        EnumItem(e) => ItemEnum::Enum(e.into_json(renderer)),
+        EnumItem(e) => {
+            let has_stripped_variants = e.has_stripped_entries();
+            ItemEnum::Enum(Enum {
+                generics: renderer.generics_into_json(&e.generics, owner_def_id),
+                has_stripped_variants,
+                variants: renderer.ids(&e.variants.as_slice().raw),
+                impls: Vec::new(),
+            })
+        }
         VariantItem(v) => ItemEnum::Variant(v.into_json(renderer)),
-        FunctionItem(f) => {
-            ItemEnum::Function(from_clean_function(f, true, header.unwrap(), renderer))
-        }
-        ForeignFunctionItem(f, _) => {
-            ItemEnum::Function(from_clean_function(f, false, header.unwrap(), renderer))
-        }
+        FunctionItem(f) => ItemEnum::Function(from_clean_function(
+            f,
+            owner_def_id,
+            true,
+            header.unwrap(),
+            renderer,
+        )),
+        ForeignFunctionItem(f, _) => ItemEnum::Function(from_clean_function(
+            f,
+            owner_def_id,
+            false,
+            header.unwrap(),
+            renderer,
+        )),
         TraitItem(t) => ItemEnum::Trait(t.into_json(renderer)),
-        TraitAliasItem(t) => ItemEnum::TraitAlias(t.into_json(renderer)),
-        MethodItem(m, _) => {
-            ItemEnum::Function(from_clean_function(m, true, header.unwrap(), renderer))
-        }
-        RequiredMethodItem(m) => {
-            ItemEnum::Function(from_clean_function(m, false, header.unwrap(), renderer))
-        }
-        ImplItem(i) => ItemEnum::Impl(i.into_json(renderer)),
+        TraitAliasItem(t) => ItemEnum::TraitAlias(TraitAlias {
+            generics: renderer.generics_into_json(&t.generics, owner_def_id),
+            params: t.bounds.into_json(renderer),
+        }),
+        MethodItem(m, _) => ItemEnum::Function(from_clean_function(
+            m,
+            owner_def_id,
+            true,
+            header.unwrap(),
+            renderer,
+        )),
+        RequiredMethodItem(m) => ItemEnum::Function(from_clean_function(
+            m,
+            owner_def_id,
+            false,
+            header.unwrap(),
+            renderer,
+        )),
+        ImplItem(i) => ItemEnum::Impl(from_clean_impl(i, owner_def_id, renderer)),
         StaticItem(s) => ItemEnum::Static(from_clean_static(s, rustc_hir::Safety::Safe, renderer)),
         ForeignStaticItem(s, safety) => ItemEnum::Static(from_clean_static(s, *safety, renderer)),
         ForeignTypeItem => ItemEnum::ExternType,
-        TypeAliasItem(t) => ItemEnum::TypeAlias(t.into_json(renderer)),
+        TypeAliasItem(t) => ItemEnum::TypeAlias(TypeAlias {
+            type_: t.type_.into_json(renderer),
+            generics: renderer.generics_into_json(&t.generics, owner_def_id),
+        }),
         // FIXME(generic_const_items): Add support for generic free consts
         ConstantItem(ci) => ItemEnum::Constant {
             type_: ci.type_.into_json(renderer),
@@ -326,18 +776,24 @@ fn from_clean_item(item: &clean::Item, renderer: &JsonRenderer<'_>) -> ItemEnum 
             type_: ci.type_.into_json(renderer),
             value: Some(ci.kind.expr(renderer.tcx)),
         },
-        RequiredAssocTypeItem { generics, bounds, implied_bounds } => ItemEnum::AssocType {
-            generics: generics.into_json(renderer),
-            bounds: bounds.into_json(renderer),
-            implied_bounds: implied_bounds.into_json(renderer),
-            type_: None,
-        },
-        AssocTypeItem { ty, bounds, implied_bounds } => ItemEnum::AssocType {
-            generics: ty.generics.into_json(renderer),
-            bounds: bounds.into_json(renderer),
-            implied_bounds: implied_bounds.into_json(renderer),
-            type_: Some(ty.item_type.as_ref().unwrap_or(&ty.type_).into_json(renderer)),
-        },
+        RequiredAssocTypeItem { generics, bounds } => {
+            let bounds_json: Vec<GenericBound> = bounds.into_json(renderer);
+            ItemEnum::AssocType {
+                generics: renderer.generics_into_json(generics, owner_def_id),
+                bounds: bounds_json.clone(),
+                implied_bounds: renderer.implied_bounds_for_assoc_type(owner_def_id, &bounds_json),
+                type_: None,
+            }
+        }
+        AssocTypeItem { ty, bounds } => {
+            let bounds_json: Vec<GenericBound> = bounds.into_json(renderer);
+            ItemEnum::AssocType {
+                generics: renderer.generics_into_json(&ty.generics, owner_def_id),
+                bounds: bounds_json.clone(),
+                implied_bounds: renderer.implied_bounds_for_assoc_type(owner_def_id, &bounds_json),
+                type_: Some(ty.item_type.as_ref().unwrap_or(&ty.type_).into_json(renderer)),
+            }
+        }
         // `convert_item` early returns `None` for stripped items, keywords and attributes.
         KeywordItem | AttributeItem => unreachable!(),
         StrippedItem(inner) => {
@@ -464,9 +920,9 @@ impl FromClean<clean::GenericParamDefKind> for GenericParamDefKind {
             Lifetime { outlives } => {
                 GenericParamDefKind::Lifetime { outlives: outlives.into_json(renderer) }
             }
-            Type { bounds, implied_bounds, default, synthetic } => GenericParamDefKind::Type {
+            Type { bounds, default, synthetic } => GenericParamDefKind::Type {
                 bounds: bounds.into_json(renderer),
-                implied_bounds: implied_bounds.into_json(renderer),
+                implied_bounds: Vec::new(),
                 default: default.into_json(renderer),
                 is_synthetic: *synthetic,
             },
@@ -582,10 +1038,11 @@ impl FromClean<clean::Type> for Type {
                 type_: Box::new(t.into_json(renderer)),
                 __pat_unstable_do_not_use: p.to_string(),
             },
-            ImplTrait { bounds, implied_bounds } => Type::ImplTrait {
-                bounds: bounds.into_json(renderer),
-                implied_bounds: implied_bounds.into_json(renderer),
-            },
+            ImplTrait { bounds, origin } => {
+                let bounds_json: Vec<GenericBound> = bounds.into_json(renderer);
+                let implied_bounds = renderer.implied_bounds_for_impl_trait(origin, &bounds_json);
+                Type::ImplTrait { bounds: bounds_json, implied_bounds }
+            }
             Infer => Type::Infer,
             RawPointer(mutability, type_) => Type::RawPointer {
                 is_mutable: *mutability == ast::Mutability::Mut,
@@ -683,19 +1140,42 @@ impl FromClean<clean::FnDecl> for FunctionSignature {
     }
 }
 
+fn from_clean_impl(impl_: &clean::Impl, owner_def_id: DefId, renderer: &JsonRenderer<'_>) -> Impl {
+    let provided_trait_methods = impl_.provided_trait_methods(renderer.tcx);
+    let clean::Impl { safety, generics, trait_, for_, items, polarity, kind } = impl_;
+    // FIXME: use something like ImplKind in JSON?
+    let (is_synthetic, blanket_impl) = match kind {
+        clean::ImplKind::Normal | clean::ImplKind::FakeVariadic => (false, None),
+        clean::ImplKind::Auto => (true, None),
+        clean::ImplKind::Blanket(ty) => (false, Some(ty)),
+    };
+    let is_negative = matches!(polarity, ty::ImplPolarity::Negative);
+    Impl {
+        is_unsafe: safety.is_unsafe(),
+        generics: renderer.generics_into_json(generics, owner_def_id),
+        provided_trait_methods: provided_trait_methods.into_iter().map(|x| x.to_string()).collect(),
+        trait_: trait_.into_json(renderer),
+        for_: for_.into_json(renderer),
+        items: renderer.ids(items),
+        is_negative,
+        is_synthetic,
+        blanket_impl: blanket_impl.map(|x| x.into_json(renderer)),
+    }
+}
+
 impl FromClean<clean::Trait> for Trait {
     fn from_clean(trait_: &clean::Trait, renderer: &JsonRenderer<'_>) -> Self {
         let tcx = renderer.tcx;
         let is_auto = trait_.is_auto(tcx);
         let is_unsafe = trait_.safety(tcx).is_unsafe();
         let is_dyn_compatible = trait_.is_dyn_compatible(tcx);
-        let clean::Trait { items, generics, bounds, .. } = trait_;
+        let clean::Trait { items, generics, bounds, def_id, .. } = trait_;
         Trait {
             is_auto,
             is_unsafe,
             is_dyn_compatible,
             items: renderer.ids(items),
-            generics: generics.into_json(renderer),
+            generics: renderer.generics_into_json(generics, *def_id),
             bounds: bounds.into_json(renderer),
             implementations: Vec::new(), // Added in JsonRenderer::item
         }
@@ -748,13 +1228,14 @@ impl FromClean<clean::Impl> for Impl {
 
 pub(crate) fn from_clean_function(
     clean::Function { decl, generics }: &clean::Function,
+    owner_def_id: DefId,
     has_body: bool,
     header: rustc_hir::FnHeader,
     renderer: &JsonRenderer<'_>,
 ) -> Function {
     Function {
         sig: decl.into_json(renderer),
-        generics: generics.into_json(renderer),
+        generics: renderer.generics_into_json(generics, owner_def_id),
         header: header.into_json(renderer),
         has_body,
     }

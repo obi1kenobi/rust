@@ -884,13 +884,11 @@ pub(crate) enum ItemKind {
     RequiredAssocTypeItem {
         generics: Generics,
         bounds: Vec<GenericBound>,
-        implied_bounds: Vec<GenericBound>,
     },
     /// An associated type in a trait impl or a provided one in a trait declaration.
     AssocTypeItem {
         ty: Box<TypeAlias>,
         bounds: Vec<GenericBound>,
-        implied_bounds: Vec<GenericBound>,
     },
     /// An item that has been stripped by a rustdoc pass
     StrippedItem(Box<ItemKind>),
@@ -1102,18 +1100,6 @@ impl GenericBound {
         self.is_bounded_by_lang_item(cx, LangItem::MetaSized)
     }
 
-    pub(crate) fn is_maybe_sized_bound(&self, cx: &DocContext<'_>) -> bool {
-        if let GenericBound::TraitBound(
-            PolyTrait { ref trait_, .. },
-            rustc_hir::TraitBoundModifiers { polarity: rustc_hir::BoundPolarity::Maybe(_), .. },
-        ) = *self
-            && cx.tcx.is_lang_item(trait_.def_id(), LangItem::Sized)
-        {
-            return true;
-        }
-        false
-    }
-
     fn is_bounded_by_lang_item(&self, cx: &DocContext<'_>, lang_item: LangItem) -> bool {
         if let GenericBound::TraitBound(
             PolyTrait { ref trait_, .. },
@@ -1182,20 +1168,10 @@ impl WherePredicate {
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub(crate) enum GenericParamDefKind {
-    Lifetime {
-        outlives: ThinVec<Lifetime>,
-    },
-    Type {
-        bounds: ThinVec<GenericBound>,
-        implied_bounds: ThinVec<GenericBound>,
-        default: Option<Box<Type>>,
-        synthetic: bool,
-    },
+    Lifetime { outlives: ThinVec<Lifetime> },
+    Type { bounds: ThinVec<GenericBound>, default: Option<Box<Type>>, synthetic: bool },
     // Option<Box<String>> makes this type smaller than `Option<String>` would.
-    Const {
-        ty: Box<Type>,
-        default: Option<Box<String>>,
-    },
+    Const { ty: Box<Type>, default: Option<Box<String>> },
 }
 
 impl GenericParamDefKind {
@@ -1322,6 +1298,14 @@ pub(crate) struct PolyTrait {
     pub(crate) generic_params: Vec<GenericParamDef>,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum ImplTraitOrigin {
+    /// Synthetic type parameter for `impl Trait` in argument position.
+    Param { def_id: DefId },
+    /// Opaque type backing `impl Trait` in return position.
+    Opaque { def_id: DefId, implicitly_sized: bool },
+}
+
 /// Rustdoc's representation of types, mostly based on the [`hir::Ty`].
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub(crate) enum Type {
@@ -1374,14 +1358,7 @@ pub(crate) enum Type {
         /// //   ^^^^^^   ^^^^^^
         /// ```
         bounds: Vec<GenericBound>,
-        /// Additional bounds implied by the syntactically present bounds:
-        /// ```rust
-        /// trait SizedAndStatic: Sized + 'static {}
-        ///
-        /// fn example(_: impl SizedAndStatic) {}
-        /// //            ^^^^ + Sized + 'static (implied)
-        /// ```
-        implied_bounds: Vec<GenericBound>,
+        origin: ImplTraitOrigin,
     },
 
     UnsafeBinder(Box<UnsafeBinderTy>),
@@ -2436,15 +2413,15 @@ mod size_asserts {
     use super::*;
     // tidy-alphabetical-start
     static_assert_size!(Crate, 16); // frequently moved by-value
-    static_assert_size!(DocFragment, 48);
-    static_assert_size!(GenericArg, 48);
+    static_assert_size!(DocFragment, 32);
+    static_assert_size!(GenericArg, 40);
     static_assert_size!(GenericArgs, 24);
-    static_assert_size!(GenericParamDef, 48);
+    static_assert_size!(GenericParamDef, 40);
     static_assert_size!(Generics, 16);
     static_assert_size!(Item, 8);
-    static_assert_size!(ItemInner, 160);
-    static_assert_size!(ItemKind, 64);
+    static_assert_size!(ItemInner, 144);
+    static_assert_size!(ItemKind, 48);
     static_assert_size!(PathSegment, 32);
-    static_assert_size!(Type, 48);
+    static_assert_size!(Type, 40);
     // tidy-alphabetical-end
 }
