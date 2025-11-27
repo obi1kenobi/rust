@@ -1852,7 +1852,7 @@ pub(crate) fn clean_ty<'tcx>(ty: &hir::Ty<'tcx>, cx: &mut DocContext<'tcx>) -> T
             );
             ImplTrait {
                 bounds,
-                origin: ImplTraitOrigin::Opaque { def_id: ty.def_id.to_def_id(), implicitly_sized },
+                origin: ImplTraitOrigin::Opaque { def_id: ty.def_id.to_def_id(), forced_sized: implicitly_sized },
             }
         }
         TyKind::Path(_) => clean_qpath(ty, cx),
@@ -2380,7 +2380,7 @@ fn clean_middle_opaque_bounds<'tcx>(
 
     ImplTrait {
         bounds,
-        origin: ImplTraitOrigin::Opaque { def_id: impl_trait_def_id, implicitly_sized: true },
+        origin: ImplTraitOrigin::Opaque { def_id: impl_trait_def_id, forced_sized: true },
     }
 }
 

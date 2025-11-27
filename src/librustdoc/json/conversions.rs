@@ -404,7 +404,7 @@ impl<'tcx> JsonRenderer<'tcx> {
                 let Some(owner_def_id) = self.tcx.opt_parent(*def_id) else { return Vec::new() };
                 self.implied_bounds_for_type_param(owner_def_id, *def_id, explicit_bounds)
             }
-            clean::ImplTraitOrigin::Opaque { def_id, implicitly_sized } => {
+            clean::ImplTraitOrigin::Opaque { def_id, forced_sized } => {
                 let args = ty::GenericArgs::identity_for_item(self.tcx, *def_id);
                 let target_ty = Ty::new_alias(
                     self.tcx,
@@ -415,7 +415,7 @@ impl<'tcx> JsonRenderer<'tcx> {
                 self.compute_implied_bounds_for_ty(
                     target_ty,
                     &clauses,
-                    *implicitly_sized,
+                    *forced_sized,
                     explicit_bounds,
                 )
             }

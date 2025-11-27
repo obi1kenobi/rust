@@ -1296,8 +1296,20 @@ pub(crate) struct PolyTrait {
 pub(crate) enum ImplTraitOrigin {
     /// Synthetic type parameter for `impl Trait` in argument position.
     Param { def_id: DefId },
+
     /// Opaque type backing `impl Trait` in return position.
-    Opaque { def_id: DefId, implicitly_sized: bool },
+    ///
+    /// `forced_sized` is `true` if this `impl Trait` is unable to opt out of being `Sized`.
+    /// `impl Trait` uses are implicitly `Sized`, but generally can opt out via a `?Sized` bound.
+    /// However, in some cases that `?Sized` opt-out is ineffective because of Rust language rules:
+    /// ```rust
+    /// fn example() -> impl Debug + ?Sized {
+    ///     123
+    /// }
+    /// ```
+    /// Here the [`ImplTraitOrigin::Opaque`] in return position has `forced_sized = true` because
+    /// Rust does not allow returning unsized types. The `?Sized` opt-out is valid, but ineffective.
+    Opaque { def_id: DefId, forced_sized: bool },
 }
 
 /// Rustdoc's representation of types, mostly based on the [`hir::Ty`].
