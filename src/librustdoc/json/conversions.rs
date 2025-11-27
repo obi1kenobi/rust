@@ -391,7 +391,8 @@ impl<'tcx> JsonRenderer<'tcx> {
             AliasTy::new_from_args(self.tcx, assoc_def_id, args),
         );
         let clauses = self.tcx.item_bounds(assoc_def_id).instantiate(self.tcx, args);
-        self.compute_implied_bounds_for_ty(target_ty, &clauses, true, explicit_bounds)
+        let allows_unsized = explicit_bounds.iter().any(|bound| self.is_maybe_sized_bound(bound));
+        self.compute_implied_bounds_for_ty(target_ty, &clauses, !allows_unsized, explicit_bounds)
     }
 
     fn implied_bounds_for_impl_trait(
