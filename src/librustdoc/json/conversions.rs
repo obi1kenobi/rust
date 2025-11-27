@@ -10,8 +10,7 @@ use rustc_hir as hir;
 use rustc_hir::attrs::{self, DeprecatedSince, DocAttribute, DocInline, HideOrShow};
 use rustc_hir::def::{CtorKind, DefKind};
 use rustc_hir::def_id::DefId;
-use rustc_hir::{HeaderSafety, LangItem, Safety};
-use rustc_infer::infer::region_constraints::GenericKind;
+use rustc_hir::{HeaderSafety, Safety};
 use rustc_metadata::rendered_const;
 use rustc_middle::ty::TyCtxt;
 use rustc_middle::bug;
@@ -25,6 +24,9 @@ use rustdoc_json_types::*;
 use crate::clean::{self, ItemId};
 use crate::formats::item_type::ItemType;
 use crate::json::JsonRenderer;
+use crate::json::implied_bounds::{
+    implied_bounds_for_assoc_type, implied_bounds_for_impl_trait, implied_bounds_for_type_param,
+};
 use crate::passes::collect_intra_doc_links::UrlFragment;
 
 impl<'tcx> JsonRenderer<'tcx> {
@@ -106,323 +108,6 @@ impl<'tcx> JsonRenderer<'tcx> {
             .collect()
     }
 
-    fn sized_trait_id(&self) -> Option<Id> {
-        self.tcx.lang_items().sized_trait().map(|did| self.id_from_item_default(did.into()))
-    }
-
-    fn is_sized_bound(&self, bound: &GenericBound) -> bool {
-        let Some(sized_id) = self.sized_trait_id() else { return false };
-        matches!(
-            bound,
-            GenericBound::TraitBound { trait_: Path { id, .. }, modifier, .. }
-                if *id == sized_id && *modifier != TraitBoundModifier::Maybe
-        )
-    }
-
-    fn is_maybe_sized_bound(&self, bound: &GenericBound) -> bool {
-        let Some(sized_id) = self.sized_trait_id() else { return false };
-        matches!(
-            bound,
-            GenericBound::TraitBound { trait_: Path { id, .. }, modifier, .. }
-                if *id == sized_id && *modifier == TraitBoundModifier::Maybe
-        )
-    }
-
-    fn clause_targets_ty(&self, clause: ty::Clause<'tcx>, target: Ty<'tcx>) -> bool {
-        if let Some(trait_clause) = clause.as_trait_clause() {
-            trait_clause.self_ty().skip_binder() == target
-        } else if let Some(type_outlives) = clause.as_type_outlives_clause() {
-            type_outlives.skip_binder().0 == target
-        } else {
-            false
-        }
-    }
-
-    fn clause_to_generic_bound(
-        &self,
-        clause: ty::Clause<'tcx>,
-        explicit_trait_bounds: &FxHashSet<(Id, TraitBoundModifier)>,
-    ) -> Option<GenericBound> {
-        if let Some(trait_clause) = clause.as_trait_clause() {
-            let def_id = trait_clause.def_id();
-            let modifier = TraitBoundModifier::None;
-            let id = self.id_from_item_default(def_id.into());
-            if explicit_trait_bounds.contains(&(id, modifier)) {
-                return None;
-            }
-            match self.tcx.as_lang_item(def_id) {
-                None => {}
-                Some(
-                    LangItem::Sized
-                    | LangItem::Clone
-                    | LangItem::Copy
-                    | LangItem::Sync
-                    | LangItem::Drop
-                    | LangItem::Add
-                    | LangItem::Sub
-                    | LangItem::Mul
-                    | LangItem::Div
-                    | LangItem::Rem
-                    | LangItem::Neg
-                    | LangItem::Not
-                    | LangItem::BitXor
-                    | LangItem::BitAnd
-                    | LangItem::BitOr
-                    | LangItem::Shl
-                    | LangItem::Shr
-                    | LangItem::AddAssign
-                    | LangItem::SubAssign
-                    | LangItem::MulAssign
-                    | LangItem::DivAssign
-                    | LangItem::RemAssign
-                    | LangItem::BitXorAssign
-                    | LangItem::BitAndAssign
-                    | LangItem::BitOrAssign
-                    | LangItem::ShlAssign
-                    | LangItem::ShrAssign
-                    | LangItem::Index
-                    | LangItem::IndexMut
-                    | LangItem::Deref
-                    | LangItem::DerefMut
-                    | LangItem::Fn
-                    | LangItem::FnMut
-                    | LangItem::FnOnce
-                    | LangItem::AsyncFn
-                    | LangItem::AsyncFnMut
-                    | LangItem::AsyncFnOnce
-                    | LangItem::Iterator
-                    | LangItem::FusedIterator
-                    | LangItem::Future
-                    | LangItem::Unpin
-                    | LangItem::PartialEq
-                    | LangItem::PartialOrd,
-                ) => {}
-                Some(_) => return None,
-            }
-
-            let path = Path { path: self.tcx.item_name(def_id).to_string(), id, args: None };
-
-            return Some(GenericBound::TraitBound {
-                trait_: path,
-                generic_params: Vec::new(),
-                modifier,
-            });
-        }
-
-        if let Some(type_outlives) = clause.as_type_outlives_clause() {
-            let ty::OutlivesPredicate(_, region) = type_outlives.skip_binder();
-            if let Some(name) = region.get_name(self.tcx) {
-                return Some(GenericBound::Outlives(name.to_string()));
-            }
-        }
-
-        None
-    }
-
-    fn compute_implied_bounds_for_ty(
-        &self,
-        target_ty: Ty<'tcx>,
-        clauses: &[ty::Clause<'tcx>],
-        implicitly_sized: bool,
-        explicit_bounds: &[GenericBound],
-    ) -> Vec<GenericBound> {
-        let mut seen: FxHashSet<_> = explicit_bounds.iter().cloned().collect();
-        let explicit_trait_bounds: FxHashSet<_> = explicit_bounds
-            .iter()
-            .filter_map(|bound| match bound {
-                GenericBound::TraitBound { trait_, modifier, .. } => Some((trait_.id, *modifier)),
-                _ => None,
-            })
-            .collect();
-        let mut implied_bounds = Vec::new();
-
-        let mut added_sized_bound = false;
-        for clause in clauses {
-            if !self.clause_targets_ty(*clause, target_ty) {
-                continue;
-            }
-
-            if let Some(bound) = self.clause_to_generic_bound(*clause, &explicit_trait_bounds) {
-                if self.is_sized_bound(&bound) {
-                    added_sized_bound = true;
-                }
-
-                if seen.insert(bound.clone()) {
-                    implied_bounds.push(bound);
-                }
-            }
-        }
-
-        if implicitly_sized && !added_sized_bound {
-            if let (Some(sized_id), Some(sized_def_id)) =
-                (self.sized_trait_id(), self.tcx.lang_items().sized_trait())
-            {
-                let sized_bound = GenericBound::TraitBound {
-                    trait_: Path {
-                        path: self.tcx.item_name(sized_def_id).to_string(),
-                        id: sized_id,
-                        args: None,
-                    },
-                    generic_params: Vec::new(),
-                    modifier: TraitBoundModifier::None,
-                };
-                if seen.insert(sized_bound.clone()) {
-                    implied_bounds.push(sized_bound);
-                }
-            }
-        }
-
-        implied_bounds
-    }
-
-    fn fn_param_used_directly(&self, owner_def_id: DefId, target_ty: Ty<'tcx>) -> bool {
-        let is_function = matches!(self.tcx.def_kind(owner_def_id), DefKind::Fn | DefKind::AssocFn);
-        if !is_function {
-            return false;
-        }
-
-        let sig = self.tcx.fn_sig(owner_def_id).instantiate_identity();
-        let sig = sig.skip_binder();
-        sig.inputs().iter().any(|ty| *ty == target_ty) || sig.output() == target_ty
-    }
-
-    fn param_ty_for_param(&self, owner_def_id: DefId, param_def_id: DefId) -> Option<Ty<'tcx>> {
-        let generics = self.tcx.generics_of(owner_def_id);
-        let index = generics.param_def_id_to_index(self.tcx, param_def_id)?;
-        let param_def = generics.param_at(index as usize, self.tcx);
-        match param_def.kind {
-            ty::GenericParamDefKind::Type { .. } => {
-                Some(ParamTy::for_def(param_def).to_ty(self.tcx))
-            }
-            _ => None,
-        }
-    }
-
-    fn implied_outlives_bounds_for_param(
-        &self,
-        owner_def_id: DefId,
-        param_ty: ParamTy,
-    ) -> Vec<GenericBound> {
-        let Some(local_def_id) = owner_def_id.as_local() else {
-            return Vec::new();
-        };
-
-        let assumed_wf = self.tcx.assumed_wf_types(local_def_id);
-        if assumed_wf.is_empty() {
-            return Vec::new();
-        }
-
-        let param_env = self.tcx.param_env(owner_def_id);
-        let infcx = self.tcx.infer_ctxt().build(TypingMode::non_body_analysis());
-        let env = OutlivesEnvironment::new(
-            &infcx,
-            local_def_id,
-            param_env,
-            assumed_wf.iter().map(|(ty, _)| *ty),
-        );
-
-        env.region_bound_pairs()
-            .iter()
-            .filter_map(|predicate| match predicate {
-                ty::OutlivesPredicate(GenericKind::Param(param), region)
-                    if param.index == param_ty.index =>
-                {
-                    region.get_name(self.tcx).map(|name| GenericBound::Outlives(name.to_string()))
-                }
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn implied_bounds_for_type_param(
-        &self,
-        owner_def_id: DefId,
-        param_def_id: DefId,
-        explicit_bounds: &[GenericBound],
-    ) -> Vec<GenericBound> {
-        let Some(target_ty) = self.param_ty_for_param(owner_def_id, param_def_id) else {
-            return Vec::new();
-        };
-
-        let clauses = self.tcx.param_env(owner_def_id).caller_bounds();
-        let allows_unsized = explicit_bounds.iter().any(|bound| self.is_maybe_sized_bound(bound));
-        let implicitly_sized =
-            !allows_unsized || self.fn_param_used_directly(owner_def_id, target_ty);
-
-        let mut implied_bounds = self.compute_implied_bounds_for_ty(
-            target_ty,
-            clauses.as_slice(),
-            implicitly_sized,
-            explicit_bounds,
-        );
-
-        let ty::Param(param_ty) = target_ty.kind() else {
-            return implied_bounds;
-        };
-
-        let extra_bounds = self.implied_outlives_bounds_for_param(owner_def_id, *param_ty);
-        if !extra_bounds.is_empty() {
-            let mut seen: FxHashSet<_> = explicit_bounds.iter().cloned().collect();
-            seen.extend(implied_bounds.iter().cloned());
-            for bound in extra_bounds {
-                if seen.insert(bound.clone()) {
-                    implied_bounds.push(bound);
-                }
-            }
-        }
-
-        implied_bounds
-    }
-
-    fn implied_bounds_for_assoc_type(
-        &self,
-        assoc_def_id: DefId,
-        explicit_bounds: &[GenericBound],
-    ) -> Vec<GenericBound> {
-        let assoc_item = self.tcx.associated_item(assoc_def_id);
-        if !matches!(assoc_item.container, ty::AssocContainer::Trait) {
-            return Vec::new();
-        }
-
-        let args = ty::GenericArgs::identity_for_item(self.tcx, assoc_def_id);
-        let target_ty = Ty::new_alias(
-            self.tcx,
-            ty::Projection,
-            AliasTy::new_from_args(self.tcx, assoc_def_id, args),
-        );
-        let clauses = self.tcx.item_bounds(assoc_def_id).instantiate(self.tcx, args);
-        let allows_unsized = explicit_bounds.iter().any(|bound| self.is_maybe_sized_bound(bound));
-        self.compute_implied_bounds_for_ty(target_ty, &clauses, !allows_unsized, explicit_bounds)
-    }
-
-    fn implied_bounds_for_impl_trait(
-        &self,
-        origin: &clean::ImplTraitOrigin,
-        explicit_bounds: &[GenericBound],
-    ) -> Vec<GenericBound> {
-        match origin {
-            clean::ImplTraitOrigin::Param { def_id } => {
-                let Some(owner_def_id) = self.tcx.opt_parent(*def_id) else { return Vec::new() };
-                self.implied_bounds_for_type_param(owner_def_id, *def_id, explicit_bounds)
-            }
-            clean::ImplTraitOrigin::Opaque { def_id, forced_sized } => {
-                let args = ty::GenericArgs::identity_for_item(self.tcx, *def_id);
-                let target_ty = Ty::new_alias(
-                    self.tcx,
-                    ty::Opaque,
-                    AliasTy::new_from_args(self.tcx, *def_id, args),
-                );
-                let clauses = self.tcx.item_bounds(*def_id).instantiate(self.tcx, args);
-                self.compute_implied_bounds_for_ty(
-                    target_ty,
-                    &clauses,
-                    *forced_sized,
-                    explicit_bounds,
-                )
-            }
-        }
-    }
-
     fn generics_into_json(&self, generics: &clean::Generics, owner_def_id: DefId) -> Generics {
         let mut param_by_name = FxHashMap::default();
         let mut param_bounds: FxHashMap<_, Vec<GenericBound>> = FxHashMap::default();
@@ -465,10 +150,11 @@ impl<'tcx> JsonRenderer<'tcx> {
                     let explicit_bounds = explicit_bounds
                         .remove(&param.def_id)
                         .unwrap_or_else(|| bounds_json.clone());
-                    let implied_bounds = self.implied_bounds_for_type_param(
+                    let implied_bounds = implied_bounds_for_type_param(
                         owner_def_id,
                         param.def_id,
                         &explicit_bounds,
+                        self,
                     );
                     GenericParamDef {
                         name: param.name.to_string(),
@@ -782,7 +468,7 @@ fn from_clean_item(item: &clean::Item, renderer: &JsonRenderer<'_>) -> ItemEnum 
             ItemEnum::AssocType {
                 generics: renderer.generics_into_json(generics, owner_def_id),
                 bounds: bounds_json.clone(),
-                implied_bounds: renderer.implied_bounds_for_assoc_type(owner_def_id, &bounds_json),
+                implied_bounds: implied_bounds_for_assoc_type(owner_def_id, &bounds_json, renderer),
                 type_: None,
             }
         }
@@ -791,7 +477,7 @@ fn from_clean_item(item: &clean::Item, renderer: &JsonRenderer<'_>) -> ItemEnum 
             ItemEnum::AssocType {
                 generics: renderer.generics_into_json(&ty.generics, owner_def_id),
                 bounds: bounds_json.clone(),
-                implied_bounds: renderer.implied_bounds_for_assoc_type(owner_def_id, &bounds_json),
+                implied_bounds: implied_bounds_for_assoc_type(owner_def_id, &bounds_json, renderer),
                 type_: Some(ty.item_type.as_ref().unwrap_or(&ty.type_).into_json(renderer)),
             }
         }
@@ -1041,7 +727,7 @@ impl FromClean<clean::Type> for Type {
             },
             ImplTrait { bounds, origin } => {
                 let bounds_json: Vec<GenericBound> = bounds.into_json(renderer);
-                let implied_bounds = renderer.implied_bounds_for_impl_trait(origin, &bounds_json);
+                let implied_bounds = implied_bounds_for_impl_trait(origin, &bounds_json, renderer);
                 Type::ImplTrait { bounds: bounds_json, implied_bounds }
             }
             Infer => Type::Infer,

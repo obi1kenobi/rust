@@ -6,6 +6,7 @@
 
 mod conversions;
 mod ids;
+mod implied_bounds;
 mod import_finder;
 
 use std::cell::RefCell;
