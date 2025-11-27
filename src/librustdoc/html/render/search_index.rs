@@ -2293,7 +2293,8 @@ fn simplify_fn_type<'a, 'tcx>(
                 && trait_.items.iter().any(|at| at.is_required_associated_type())
             {
                 for assoc_ty in &trait_.items {
-                    if let clean::ItemKind::RequiredAssocTypeItem(_, bounds) = &assoc_ty.kind
+                    if let clean::ItemKind::RequiredAssocTypeItem(_generics, bounds) =
+                        &assoc_ty.kind
                         && let Some(name) = assoc_ty.name
                     {
                         let idx = -isize::try_from(rgen.len() + 1).unwrap();

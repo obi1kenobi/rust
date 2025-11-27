@@ -1552,9 +1552,9 @@ fn render_deref_methods(
         .items
         .iter()
         .find_map(|item| match item.kind {
-            clean::AssocTypeItem(box ref ty, ..) => Some(match *ty {
-                clean::TypeAlias { item_type: Some(ref type_), .. } => (type_, &ty.type_),
-                _ => (&ty.type_, &ty.type_),
+            clean::AssocTypeItem(box ref t, ..) => Some(match *t {
+                clean::TypeAlias { item_type: Some(ref type_), .. } => (type_, &t.type_),
+                _ => (&t.type_, &t.type_),
             }),
             _ => None,
         })
@@ -1976,7 +1976,7 @@ fn render_impl(
                         ),
                     )?;
                 }
-                clean::AssocTypeItem(tydef, ..) => {
+                clean::AssocTypeItem(tydef, _) => {
                     let source_id = format!("{item_type}.{name}");
                     let id = cx.derive_id(&source_id);
                     write!(
@@ -2301,15 +2301,15 @@ fn render_impl_summary(
             write!(w, "{}", print_impl(inner_impl, use_absolute, cx))?;
             if show_def_docs {
                 for it in &inner_impl.items {
-                    if let clean::AssocTypeItem(ref ty, ..) = it.kind {
+                    if let clean::AssocTypeItem(ref tydef, ref _bounds) = it.kind {
                         write!(
                             w,
                             "<div class=\"where\">  {};</div>",
                             assoc_type(
                                 it,
-                                &ty.generics,
+                                &tydef.generics,
                                 &[], // intentionally leaving out bounds
-                                Some(&ty.type_),
+                                Some(&tydef.type_),
                                 AssocItemLink::Anchor(None),
                                 0,
                                 cx,
