@@ -1,6 +1,6 @@
 use rustc_data_structures::fx::FxHashSet;
-use rustc_hir::def::DefKind;
 use rustc_hir::LangItem;
+use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
 use rustc_infer::infer::region_constraints::GenericKind;
 use rustc_middle::ty::{self, AliasTy, ParamTy, Ty, TyCtxt, TypingMode};
@@ -106,8 +106,7 @@ pub(crate) fn clause_to_generic_bound<'tcx>(
             Some(_) => return None,
         }
 
-        let path =
-            Path { path: renderer.tcx.item_name(def_id).to_string(), id, args: None };
+        let path = Path { path: renderer.tcx.item_name(def_id).to_string(), id, args: None };
 
         return Some(GenericBound::TraitBound {
             trait_: path,
@@ -327,7 +326,13 @@ pub(crate) fn implied_bounds_for_impl_trait<'tcx>(
                 AliasTy::new_from_args(renderer.tcx, *def_id, args),
             );
             let clauses = renderer.tcx.item_bounds(*def_id).instantiate(renderer.tcx, args);
-            compute_implied_bounds_for_ty(target_ty, &clauses, *forced_sized, explicit_bounds, renderer)
+            compute_implied_bounds_for_ty(
+                target_ty,
+                &clauses,
+                *forced_sized,
+                explicit_bounds,
+                renderer,
+            )
         }
     }
 }
