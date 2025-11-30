@@ -42,7 +42,8 @@ use rustc_hir as hir;
 use rustc_hir::attrs::{AttributeKind, DocAttribute, DocInline};
 use rustc_hir::def::{CtorKind, DefKind, MacroKinds, Res};
 use rustc_hir::def_id::{DefId, DefIdMap, DefIdSet, LOCAL_CRATE, LocalDefId};
-use rustc_hir::{LangItem, PredicateOrigin, find_attr};
+use rustc_hir::{LangItem, OpaqueTyOrigin, PredicateOrigin, find_attr};
+use rustc_hir_analysis::hir_ty_lowering::FeedConstTy;
 use rustc_hir_analysis::{lower_const_arg_for_rustdoc, lower_ty};
 use rustc_middle::metadata::Reexport;
 use rustc_middle::middle::resolve_bound_vars as rbv;
@@ -2381,9 +2382,16 @@ fn clean_middle_opaque_bounds<'tcx>(
         ));
     }
 
+    let forced_sized = match cx.tcx.opaque_ty_origin(impl_trait_def_id) {
+        // Opaque types backing RPIT/async fn returns must always be `Sized`.
+        OpaqueTyOrigin::FnReturn { .. } | OpaqueTyOrigin::AsyncFn { .. } => true,
+        // TAITs and other opaque origins can opt out of `Sized`.
+        _ => false,
+    };
+
     ImplTrait {
         bounds,
-        origin: ImplTraitOrigin::Opaque { def_id: impl_trait_def_id, forced_sized: true },
+        origin: ImplTraitOrigin::Opaque { def_id: impl_trait_def_id, forced_sized },
     }
 }
 
