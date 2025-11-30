@@ -1368,6 +1368,8 @@ pub(crate) enum Type {
         /// //   ^^^^^^   ^^^^^^
         /// ```
         bounds: Vec<GenericBound>,
+        /// Whether this `impl Trait` is syntactic sugar for an anonymous generic parameter,
+        /// or represents an opaque type.
         origin: ImplTraitOrigin,
     },
 
