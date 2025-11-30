@@ -1,4 +1,4 @@
-use rustc_data_structures::fx::FxHashSet;
+use rustc_data_structures::fx::{FxHashSet, FxIndexSet};
 use rustc_hir::LangItem;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
@@ -19,7 +19,10 @@ pub(crate) fn implied_bounds_for_ty<'tcx>(
     explicit_bounds: &[GenericBound],
     renderer: &JsonRenderer<'tcx>,
 ) -> Vec<GenericBound> {
-    let mut seen: FxHashSet<_> = explicit_bounds.iter().cloned().collect();
+    let mut bounds =
+        FxIndexSet::with_capacity_and_hasher(explicit_bounds.len(), Default::default());
+    bounds.extend(explicit_bounds.iter().cloned());
+
     let explicit_trait_bounds: FxHashSet<_> = explicit_bounds
         .iter()
         .filter_map(|bound| match bound {
@@ -27,7 +30,6 @@ pub(crate) fn implied_bounds_for_ty<'tcx>(
             _ => None,
         })
         .collect();
-    let mut implied_bounds = Vec::new();
 
     let mut added_sized_bound = false;
     for clause in clauses {
@@ -40,9 +42,7 @@ pub(crate) fn implied_bounds_for_ty<'tcx>(
                 added_sized_bound = true;
             }
 
-            if seen.insert(bound.clone()) {
-                implied_bounds.push(bound);
-            }
+            bounds.insert(bound);
         }
     }
 
@@ -59,13 +59,11 @@ pub(crate) fn implied_bounds_for_ty<'tcx>(
                 generic_params: Vec::new(),
                 modifier: TraitBoundModifier::None,
             };
-            if seen.insert(sized_bound.clone()) {
-                implied_bounds.push(sized_bound);
-            }
+            bounds.insert(sized_bound);
         }
     }
 
-    implied_bounds
+    bounds.into_iter().skip(explicit_bounds.len()).collect()
 }
 
 pub(crate) fn implied_bounds_for_type_param<'tcx>(
@@ -148,13 +146,7 @@ pub(crate) fn implied_bounds_for_impl_trait<'tcx>(
                 AliasTy::new_from_args(renderer.tcx, *def_id, args),
             );
             let clauses = renderer.tcx.item_bounds(*def_id).instantiate(renderer.tcx, args);
-            implied_bounds_for_ty(
-                target_ty,
-                &clauses,
-                *forced_sized,
-                explicit_bounds,
-                renderer,
-            )
+            implied_bounds_for_ty(target_ty, &clauses, *forced_sized, explicit_bounds, renderer)
         }
     }
 }
