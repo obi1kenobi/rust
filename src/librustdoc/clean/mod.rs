@@ -2382,7 +2382,15 @@ fn clean_middle_opaque_bounds<'tcx>(
         bounds,
         origin: ImplTraitOrigin::Opaque {
             def_id: impl_trait_def_id,
-            forced_sized: is_opaque_forced_sized(&cx.tcx.opaque_ty_origin(impl_trait_def_id)),
+            forced_sized: if impl_trait_def_id.is_local() {
+                is_opaque_forced_sized(&cx.tcx.opaque_ty_origin(impl_trait_def_id))
+            } else {
+                // FIXME: No origin information available in metadata for some cross-crate opaques.
+                // Calling `tcx.opaque_ty_origin()` for them will cause an ICE.
+                // Neither `true` nor `false` is necessarily correct here,
+                // but the fix is likely not trivial.
+                false
+            },
         },
     }
 }
