@@ -1847,15 +1847,11 @@ pub(crate) fn clean_ty<'tcx>(ty: &hir::Ty<'tcx>, cx: &mut DocContext<'tcx>) -> T
         TyKind::OpaqueDef(ty) => {
             let bounds =
                 ty.bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect::<Vec<_>>();
-            let implicitly_sized = matches!(
-                ty.origin,
-                OpaqueTyOrigin::FnReturn { .. } | OpaqueTyOrigin::AsyncFn { .. }
-            );
             ImplTrait {
                 bounds,
                 origin: ImplTraitOrigin::Opaque {
                     def_id: ty.def_id.to_def_id(),
-                    forced_sized: implicitly_sized,
+                    forced_sized: is_opaque_forced_sized(&ty.origin),
                 },
             }
         }
@@ -2382,16 +2378,12 @@ fn clean_middle_opaque_bounds<'tcx>(
         ));
     }
 
-    let forced_sized = match cx.tcx.opaque_ty_origin(impl_trait_def_id) {
-        // Opaque types backing RPIT/async fn returns must always be `Sized`.
-        OpaqueTyOrigin::FnReturn { .. } | OpaqueTyOrigin::AsyncFn { .. } => true,
-        // TAITs and other opaque origins can opt out of `Sized`.
-        _ => false,
-    };
-
     ImplTrait {
         bounds,
-        origin: ImplTraitOrigin::Opaque { def_id: impl_trait_def_id, forced_sized },
+        origin: ImplTraitOrigin::Opaque {
+            def_id: impl_trait_def_id,
+            forced_sized: is_opaque_forced_sized(&cx.tcx.opaque_ty_origin(impl_trait_def_id)),
+        },
     }
 }
 
@@ -2653,6 +2645,16 @@ fn clean_unsafe_binder_ty<'tcx>(
         .collect();
     let ty = clean_ty(unsafe_binder_ty.inner_ty, cx);
     UnsafeBinderTy { generic_params, ty }
+}
+
+fn is_opaque_forced_sized<D>(origin: &OpaqueTyOrigin<D>) -> bool {
+    match origin {
+        // Opaque types backing RPIT/async fn returns must always be `Sized`.
+        // Any `?Sized` that is syntactically present is always overridden with `Sized`.
+        OpaqueTyOrigin::FnReturn { .. } | OpaqueTyOrigin::AsyncFn { .. } => true,
+        // TAITs don't have to be sized. `?Sized` opts them out of the implied `Sized`.
+        OpaqueTyOrigin::TyAlias { .. } => false,
+    }
 }
 
 pub(crate) fn reexport_chain(
