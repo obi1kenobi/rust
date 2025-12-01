@@ -47,9 +47,8 @@ pub(crate) fn implied_bounds_for_ty<'tcx>(
     }
 
     if implicitly_sized && !added_sized_bound {
-        if let (Some(sized_id), Some(sized_def_id)) =
-            (sized_trait_id(renderer), renderer.tcx.lang_items().sized_trait())
-        {
+        if let Some(sized_def_id) = renderer.tcx.lang_items().sized_trait() {
+            let sized_id = renderer.id_from_item_default(sized_def_id.into());
             let sized_bound = GenericBound::TraitBound {
                 trait_: Path {
                     path: renderer.tcx.item_name(sized_def_id).to_string(),
