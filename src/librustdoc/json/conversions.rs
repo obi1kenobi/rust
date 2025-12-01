@@ -29,7 +29,7 @@ use crate::json::implied_bounds::{
 };
 use crate::passes::collect_intra_doc_links::UrlFragment;
 
-impl<'tcx> JsonRenderer<'tcx> {
+impl JsonRenderer<'_> {
     pub(super) fn convert_item(&self, item: &clean::Item) -> Option<Item> {
         let deprecation = item.deprecation(self.tcx);
         let links = self

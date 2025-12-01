@@ -78,7 +78,7 @@ pub(crate) fn implied_bounds_for_type_param<'tcx>(
     let clauses = renderer.tcx.param_env(owner_def_id).caller_bounds();
     let allows_unsized = explicit_bounds.iter().any(|bound| is_maybe_sized_bound(bound, renderer));
     let implicitly_sized =
-        !allows_unsized || fn_param_used_directly(renderer.tcx, owner_def_id, target_ty);
+        !allows_unsized || ty_used_directly_in_fn(renderer.tcx, owner_def_id, target_ty);
 
     let mut implied_bounds = implied_bounds_for_ty(
         target_ty,
@@ -196,6 +196,8 @@ fn clause_to_generic_bound<'tcx>(
         }
         match renderer.tcx.as_lang_item(def_id) {
             None => {}
+
+            // These are all the language item traits that are stable in Rust today.
             Some(
                 LangItem::Sized
                 | LangItem::Clone
@@ -263,17 +265,21 @@ fn clause_to_generic_bound<'tcx>(
     None
 }
 
-fn fn_param_used_directly<'tcx>(
+/// Whether a type is an exact match for a parameter or return type in the given function.
+///
+/// If this function returns `true`, then the given type must be `Sized` since Rust
+/// does not currently support unsized fn parameters or return values.
+fn ty_used_directly_in_fn<'tcx>(
     tcx: TyCtxt<'tcx>,
-    owner_def_id: DefId,
+    fn_def_id: DefId,
     target_ty: Ty<'tcx>,
 ) -> bool {
-    let is_function = matches!(tcx.def_kind(owner_def_id), DefKind::Fn | DefKind::AssocFn);
+    let is_function = matches!(tcx.def_kind(fn_def_id), DefKind::Fn | DefKind::AssocFn);
     if !is_function {
         return false;
     }
 
-    let sig = tcx.fn_sig(owner_def_id).instantiate_identity();
+    let sig = tcx.fn_sig(fn_def_id).instantiate_identity();
     let sig = sig.skip_binder();
     sig.inputs().iter().any(|ty| *ty == target_ty) || sig.output() == target_ty
 }
