@@ -1,7 +1,7 @@
 use rustc_data_structures::fx::FxHashSet;
-use rustc_hir::LangItem;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
+use rustc_hir::{LangItem, OpaqueTyOrigin};
 use rustc_infer::infer::region_constraints::GenericKind;
 use rustc_middle::ty::{self, AliasTy, ParamTy, Ty, TyCtxt, TypingMode};
 use rustc_trait_selection::infer::TyCtxtInferExt;
@@ -148,7 +148,26 @@ pub(crate) fn implied_bounds_for_impl_trait<'tcx>(
                 AliasTy::new_from_args(renderer.tcx, *def_id, args),
             );
             let clauses = renderer.tcx.item_bounds(*def_id).instantiate(renderer.tcx, args);
-            implied_bounds_for_ty(target_ty, &clauses, *forced_sized, explicit_bounds, renderer)
+            let mut implied_bounds = implied_bounds_for_ty(
+                target_ty,
+                &clauses,
+                *forced_sized,
+                explicit_bounds,
+                renderer,
+            );
+
+            let extra_bounds = implied_outlives_bounds_for_opaque(renderer.tcx, *def_id);
+            if !extra_bounds.is_empty() {
+                let mut seen: FxHashSet<_> = explicit_bounds.iter().cloned().collect();
+                seen.extend(implied_bounds.iter().cloned());
+                for bound in extra_bounds {
+                    if seen.insert(bound.clone()) {
+                        implied_bounds.push(bound);
+                    }
+                }
+            }
+
+            implied_bounds
         }
     }
 }
@@ -326,6 +345,54 @@ fn implied_outlives_bounds_for_param<'tcx>(
             ty::OutlivesPredicate(GenericKind::Param(param), region)
                 if param.index == param_ty.index =>
             {
+                region.get_name(tcx).map(|name| GenericBound::Outlives(name.to_string()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// If the opaque is a TAIT / ATPIT, return any additional outlives bounds.
+///
+/// For example, `type Foo<'a, T> = &'a impl PartialEq<T>;`
+/// has an implied `+ 'a` bound that would be returned here.
+///
+/// If this function is called with a different kind of opaque, it returns no bounds.
+///
+/// We also aren't able to return any bounds for cross-crate TAITs due to missing metadata.
+fn implied_outlives_bounds_for_opaque<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    opaque_def_id: DefId,
+) -> Vec<GenericBound> {
+    if tcx.def_kind(opaque_def_id) != DefKind::OpaqueTy {
+        return Vec::new();
+    }
+
+    let OpaqueTyOrigin::TyAlias { parent, .. } = tcx.opaque_ty_origin(opaque_def_id) else {
+        return Vec::new();
+    };
+
+    let Some(local_parent) = parent.as_local() else {
+        // Cross-crate TAITs don't carry the parent WF info in metadata,
+        // so we can't infer outlives bounds here.
+        return Vec::new();
+    };
+
+    let param_env = tcx.param_env(parent);
+    let parent_ty = tcx.type_of(parent).instantiate_identity();
+    let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+    let env = OutlivesEnvironment::new(&infcx, local_parent, param_env, [parent_ty]);
+
+    let target_args = ty::GenericArgs::identity_for_item(tcx, parent).extend_to(
+        tcx,
+        opaque_def_id,
+        |param, _| tcx.map_opaque_lifetime_to_parent_lifetime(param.def_id.expect_local()).into(),
+    );
+    let target_alias = AliasTy::new_from_args(tcx, opaque_def_id, target_args);
+    env.region_bound_pairs()
+        .iter()
+        .filter_map(|predicate| match predicate {
+            ty::OutlivesPredicate(GenericKind::Alias(alias), region) if *alias == target_alias => {
                 region.get_name(tcx).map(|name| GenericBound::Outlives(name.to_string()))
             }
             _ => None,
