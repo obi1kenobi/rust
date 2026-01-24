@@ -21,8 +21,8 @@ pub fn returns_maybe_unsized() -> impl Clone + ?Sized {
 
 //@ has "$.index[?(@.name=='returns_maybe_unsized_ref')].inner.function.sig.output.borrowed_ref.type.impl_trait.bounds[?(@.trait_bound.trait.path=='Debug')]"
 //@ has "$.index[?(@.name=='returns_maybe_unsized_ref')].inner.function.sig.output.borrowed_ref.type.impl_trait.bounds[?(@.trait_bound.trait.path=='Sized' && @.trait_bound.modifier=='maybe')]"
-//@ has "$.index[?(@.name=='returns_maybe_unsized_ref')].inner.function.sig.output.borrowed_ref.type.impl_trait.implied_bounds[?(@.trait_bound.trait.path=='Sized' && @.trait_bound.modifier=='none')]"
+//@ !has "$.index[?(@.name=='returns_maybe_unsized_ref')].inner.function.sig.output.borrowed_ref.type.impl_trait.implied_bounds[?(@.trait_bound.trait.path=='Sized' && @.trait_bound.modifier=='none')]"
 //@ !has "$.index[?(@.name=='returns_maybe_unsized_ref')].inner.function.sig.output.borrowed_ref.type.impl_trait.implied_bounds[?(@.trait_bound.trait.path=='Debug')]"
 pub fn returns_maybe_unsized_ref() -> &'static (impl Debug + ?Sized) {
-    Box::leak(Box::new("hello world".to_string()))
+    "hello world"
 }

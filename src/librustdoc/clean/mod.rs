@@ -1850,7 +1850,7 @@ pub(crate) fn clean_ty<'tcx>(ty: &hir::Ty<'tcx>, cx: &mut DocContext<'tcx>) -> T
                 bounds,
                 origin: ImplTraitOrigin::Opaque {
                     def_id: ty.def_id.to_def_id(),
-                    forced_sized: is_opaque_forced_sized(&ty.origin),
+                    needs_sized_check: opaque_needs_sized_check(&ty.origin),
                 },
             }
         }
@@ -2381,11 +2381,12 @@ fn clean_middle_opaque_bounds<'tcx>(
         bounds,
         origin: ImplTraitOrigin::Opaque {
             def_id: impl_trait_def_id,
-            forced_sized: if cx.tcx.opt_rpitit_info(impl_trait_def_id).is_some() {
-                // Unsized returns are not supported, so the RPITIT is forced-sized.
+            needs_sized_check: if cx.tcx.opt_rpitit_info(impl_trait_def_id).is_some() {
+                // RPITIT uses can imply `Sized` unless used behind indirection,
+                // so a precise check is necessary.
                 true
             } else {
-                is_opaque_forced_sized(&cx.tcx.opaque_ty_origin(impl_trait_def_id))
+                opaque_needs_sized_check(&cx.tcx.opaque_ty_origin(impl_trait_def_id))
             },
         },
     }
@@ -2651,12 +2652,13 @@ fn clean_unsafe_binder_ty<'tcx>(
     UnsafeBinderTy { generic_params, ty }
 }
 
-fn is_opaque_forced_sized<D>(origin: &OpaqueTyOrigin<D>) -> bool {
+fn opaque_needs_sized_check<D>(origin: &OpaqueTyOrigin<D>) -> bool {
     match origin {
-        // Opaque types backing RPIT/async fn returns must always be `Sized`.
-        // Any `?Sized` that is syntactically present is always overridden with `Sized`.
+        // Return-position opaques need a sizedness check at their use-site,
+        // even if they have a `?Sized` bound.
         OpaqueTyOrigin::FnReturn { .. } | OpaqueTyOrigin::AsyncFn { .. } => true,
-        // TAITs don't have to be sized. `?Sized` opts them out of the implied `Sized`.
+        // TAITs don't need a use-site sizedness check.
+        // `?Sized` in their definition always opts them out of being sized.
         OpaqueTyOrigin::TyAlias { .. } => false,
     }
 }

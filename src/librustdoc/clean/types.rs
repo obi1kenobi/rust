@@ -1299,21 +1299,22 @@ pub(crate) enum ImplTraitOrigin {
 
     /// Opaque type backing `impl Trait`, such as in RPIT or TAIT.
     ///
-    /// `impl Trait` uses are implicitly `Sized`, but often can opt out via a `?Sized` bound.
-    /// `forced_sized` is `true` if this `impl Trait` is unable to opt out of being `Sized`.
+    /// `impl Trait` uses are `Sized` by default, but they can opt out via a `?Sized` bound.
+    /// `needs_sized_check` is `true` when the opaque is in a category that requires a
+    /// point-of-use sizedness check to determine if an implied `Sized` bound is added.
     ///
-    /// For example:
-    /// ```rust
-    /// fn example() -> impl Debug + ?Sized {
-    ///     123
-    /// }
-    /// ```
+    /// `needs_sized_check = true` occurs in cases like:
+    /// - RPIT: `fn f() -> impl Debug { 0u8 }`
+    /// - RPITIT: `trait T { fn f(&self) -> impl Debug; }`
     ///
-    /// In that example, the [`ImplTraitOrigin::Opaque`] in return position
-    /// has `forced_sized = true` because Rust does not allow returning unsized types.
-    /// The `?Sized` bound is syntactically valid, but has no effect on the opaque type
-    /// which is still `Sized` regardless.
-    Opaque { def_id: DefId, forced_sized: bool },
+    /// `needs_sized_check = false` occurs in cases like:
+    /// - TAIT/ATPIT: `type Alias = impl Debug + ?Sized;`
+    ///
+    /// A `true` value for `needs_sized_check` does not guarantee the opaque is `Sized`.
+    /// For example, `fn f() -> &(impl Debug + ?Sized) { "hi" }` has a return-position opaque
+    /// which makes `needs_sized_check = true`, but as the opaque is behind a reference,
+    /// it does not end up getting a `Sized` bound.
+    Opaque { def_id: DefId, needs_sized_check: bool },
 }
 
 /// Rustdoc's representation of types, mostly based on the [`hir::Ty`].

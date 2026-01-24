@@ -1,4 +1,5 @@
 use rustc_data_structures::fx::FxHashSet;
+use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
 use rustc_hir::{LangItem, OpaqueTyOrigin};
@@ -74,14 +75,15 @@ pub(crate) fn implied_bounds_for_type_param<'tcx>(
     explicit_bounds: &[GenericBound],
     renderer: &JsonRenderer<'tcx>,
 ) -> Vec<GenericBound> {
-    let Some(target_ty) = param_ty_for_param(renderer.tcx, owner_def_id, param_def_id) else {
+    let Some(target_param) = param_ty_for_param(renderer.tcx, owner_def_id, param_def_id) else {
         return Vec::new();
     };
+    let target_ty = target_param.to_ty(renderer.tcx);
 
     let clauses = renderer.tcx.param_env(owner_def_id).caller_bounds();
     let allows_unsized = explicit_bounds.iter().any(|bound| is_maybe_sized_bound(bound, renderer));
     let implicitly_sized =
-        !allows_unsized || ty_used_directly_in_fn(renderer.tcx, owner_def_id, target_ty);
+        !allows_unsized || param_requires_sized_in_fn_sig(renderer.tcx, owner_def_id, target_param);
 
     let mut implied_bounds = implied_bounds_for_ty(
         target_ty,
@@ -91,11 +93,7 @@ pub(crate) fn implied_bounds_for_type_param<'tcx>(
         renderer,
     );
 
-    let ty::Param(param_ty) = target_ty.kind() else {
-        return implied_bounds;
-    };
-
-    let extra_bounds = implied_outlives_bounds_for_param(renderer.tcx, owner_def_id, *param_ty);
+    let extra_bounds = implied_outlives_bounds_for_param(renderer.tcx, owner_def_id, target_param);
     if !extra_bounds.is_empty() {
         let mut seen: FxHashSet<_> = explicit_bounds.iter().cloned().collect();
         seen.extend(implied_bounds.iter().cloned());
@@ -140,7 +138,7 @@ pub(crate) fn implied_bounds_for_impl_trait<'tcx>(
             let Some(owner_def_id) = renderer.tcx.opt_parent(*def_id) else { return Vec::new() };
             implied_bounds_for_type_param(owner_def_id, *def_id, explicit_bounds, renderer)
         }
-        clean::ImplTraitOrigin::Opaque { def_id, forced_sized } => {
+        clean::ImplTraitOrigin::Opaque { def_id, needs_sized_check } => {
             let args = ty::GenericArgs::identity_for_item(renderer.tcx, *def_id);
             let target_ty = Ty::new_alias(
                 renderer.tcx,
@@ -148,10 +146,25 @@ pub(crate) fn implied_bounds_for_impl_trait<'tcx>(
                 AliasTy::new_from_args(renderer.tcx, *def_id, args),
             );
             let clauses = renderer.tcx.item_bounds(*def_id).instantiate(renderer.tcx, args);
+
+            // If `?Sized` is present, we need to determine whether the use site implies
+            // the opaque type is `Sized` or not. The use site check involves a HIR walk,
+            // and `?Sized` bounds are relatively rare in Rust, so we prefer to perform
+            // the checks in the order that's likely the least work:
+            // - If no explicit `?Sized` bound is present, `Sized` is implied by default.
+            // - Otherwise, walk the HIR to determine whether `Sized` is implied or not.
+            let explicit_maybe_sized =
+                explicit_bounds.iter().any(|bound| is_maybe_sized_bound(bound, renderer));
+            let implicitly_sized = if *needs_sized_check && explicit_maybe_sized {
+                opaque_is_implied_sized_by_use_site(renderer.tcx, *def_id)
+            } else {
+                false
+            };
+
             let mut implied_bounds = implied_bounds_for_ty(
                 target_ty,
                 &clauses,
-                *forced_sized,
+                implicitly_sized,
                 explicit_bounds,
                 renderer,
             );
@@ -287,11 +300,16 @@ fn clause_to_generic_bound<'tcx>(
     None
 }
 
-/// Whether a type is an exact match for a parameter or return type in the given function.
+/// Returns `true` if the function signature requires the type parameter to be `Sized`.
 ///
-/// If this function returns `true`, then the given type must be `Sized` since Rust
-/// does not currently support unsized fn parameters or return values.
-fn ty_used_directly_in_fn<'tcx>(tcx: TyCtxt<'tcx>, fn_def_id: DefId, target_ty: Ty<'tcx>) -> bool {
+/// This includes direct uses in fn params/return values and nested positions that must be sized.
+/// Uses behind indirection, or in a DST tail of a type that is itself allowed to be unsized,
+/// do not require `Sized`.
+fn param_requires_sized_in_fn_sig<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    fn_def_id: DefId,
+    target_param: ParamTy,
+) -> bool {
     let is_function = matches!(tcx.def_kind(fn_def_id), DefKind::Fn | DefKind::AssocFn);
     if !is_function {
         return false;
@@ -299,19 +317,298 @@ fn ty_used_directly_in_fn<'tcx>(tcx: TyCtxt<'tcx>, fn_def_id: DefId, target_ty: 
 
     let sig = tcx.fn_sig(fn_def_id).instantiate_identity();
     let sig = sig.skip_binder();
-    sig.inputs().iter().any(|ty| *ty == target_ty) || sig.output() == target_ty
+    sig.inputs().iter().any(|ty| param_requires_sized_in_ty(tcx, *ty, target_param, false))
+        || param_requires_sized_in_ty(tcx, sig.output(), target_param, false)
+}
+
+fn param_requires_sized_in_ty<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ty: Ty<'tcx>,
+    target_param: ParamTy,
+    allow_unsized: bool,
+) -> bool {
+    match *ty.kind() {
+        ty::Param(param) => param == target_param && !allow_unsized,
+
+        // Uses behind `&`, `&mut`, `* const`, or `* mut` are not required to be `Sized`.
+        ty::Ref(_, inner, _) => param_requires_sized_in_ty(tcx, inner, target_param, true),
+        ty::RawPtr(inner, _) => param_requires_sized_in_ty(tcx, inner, target_param, true),
+
+        // The types within slices and arrays must be `Sized`.
+        ty::Slice(inner) => param_requires_sized_in_ty(tcx, inner, target_param, false),
+        ty::Array(inner, _) => param_requires_sized_in_ty(tcx, inner, target_param, false),
+
+        // All fields except the last field must be `Sized`.
+        // The last field may be unsized if the tuple itself is a DST.
+        ty::Tuple(tys) => {
+            let last_index = tys.len().saturating_sub(1);
+            for (index, elem) in tys.iter().enumerate() {
+                let elem_allows_unsized = allow_unsized && index == last_index;
+                if param_requires_sized_in_ty(tcx, elem, target_param, elem_allows_unsized) {
+                    return true;
+                }
+            }
+            false
+        }
+
+        // Structs are similar to tuples: the all fields except the last must be `Sized`,
+        // while the last field may be unsized if the struct is a DST.
+        ty::Adt(def, args) if def.is_struct() => {
+            let variant = def.non_enum_variant();
+            let last_index = variant.fields.len().saturating_sub(1);
+            for (index, field) in variant.fields.iter().enumerate() {
+                let field_allows_unsized = allow_unsized && index == last_index;
+                let field_ty = field.ty(tcx, args);
+                if param_requires_sized_in_ty(tcx, field_ty, target_param, field_allows_unsized) {
+                    return true;
+                }
+            }
+            false
+        }
+        ty::Pat(inner, _) => param_requires_sized_in_ty(tcx, inner, target_param, allow_unsized),
+        _ => false,
+    }
+}
+
+fn opaque_is_implied_sized_by_use_site(tcx: TyCtxt<'_>, opaque_def_id: DefId) -> bool {
+    let Some(local_def_id) = opaque_def_id.as_local() else {
+        return true;
+    };
+    let origin = tcx.opaque_ty_origin(local_def_id.to_def_id());
+    let parent = match origin {
+        OpaqueTyOrigin::FnReturn { parent, .. } | OpaqueTyOrigin::AsyncFn { parent, .. } => parent,
+        OpaqueTyOrigin::TyAlias { .. } => return false,
+    };
+    let Some(parent_local) = parent.as_local() else {
+        return true;
+    };
+    let Some(fn_decl) = tcx.hir_node_by_def_id(parent_local).fn_decl() else {
+        return false;
+    };
+    let hir::FnRetTy::Return(ret_ty) = fn_decl.output else {
+        return true;
+    };
+    match opaque_use_in_ty(ret_ty, opaque_def_id, false) {
+        Some(OpaqueUse::Direct) => true,
+        Some(OpaqueUse::BehindPointer) => false,
+        None => true,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpaqueUse {
+    Direct,
+    BehindPointer,
+}
+
+fn opaque_use_in_ty<'hir, Unambig>(
+    ty: &'hir hir::Ty<'hir, Unambig>,
+    opaque_def_id: DefId,
+    allow_unsized: bool,
+) -> Option<OpaqueUse> {
+    match ty.kind {
+        hir::TyKind::OpaqueDef(opaque) => {
+            let found = if opaque.def_id.to_def_id() == opaque_def_id {
+                if !allow_unsized {
+                    return Some(OpaqueUse::Direct);
+                }
+
+                Some(OpaqueUse::BehindPointer)
+            } else {
+                None
+            };
+
+            opaque_use_in_bounds(opaque.bounds, opaque_def_id, allow_unsized).or(found)
+        }
+        // References can point to DSTs, so an opaque under `&`/`&mut` does not need to be `Sized`.
+        hir::TyKind::Ref(_, mut_ty) => opaque_use_in_ty(mut_ty.ty, opaque_def_id, true),
+        // Raw pointers can also point to DSTs, so `* const`/`* mut` allows unsized pointees.
+        hir::TyKind::Ptr(mut_ty) => opaque_use_in_ty(mut_ty.ty, opaque_def_id, true),
+        // Slice elements must be `Sized`, even though the slice itself is a DST.
+        hir::TyKind::Slice(inner) => opaque_use_in_ty(inner, opaque_def_id, false),
+        // Array elements must be `Sized`; an unsized element would make the array ill-formed.
+        hir::TyKind::Array(inner, _) => opaque_use_in_ty(inner, opaque_def_id, false),
+        hir::TyKind::Tup(tys) => {
+            let mut found = None;
+            let last_index = tys.len().saturating_sub(1);
+            for (index, ty) in tys.iter().enumerate() {
+                // Only the tuple tail can be unsized; all earlier elements must be `Sized`.
+                let elem_allows_unsized = allow_unsized && index == last_index;
+                match opaque_use_in_ty(ty, opaque_def_id, elem_allows_unsized) {
+                    Some(OpaqueUse::Direct) => return Some(OpaqueUse::Direct),
+                    Some(OpaqueUse::BehindPointer) => found = Some(OpaqueUse::BehindPointer),
+                    None => {}
+                }
+            }
+            found
+        }
+        hir::TyKind::Path(qpath) => opaque_use_in_qpath(&qpath, opaque_def_id, allow_unsized),
+        hir::TyKind::TraitObject(bounds, ..) => {
+            opaque_use_in_poly_trait_refs(bounds, opaque_def_id, allow_unsized)
+        }
+        // `impl Trait` is not allowed inside fn pointer types, so we will not find an opaque here.
+        hir::TyKind::FnPtr(_) => None,
+        hir::TyKind::UnsafeBinder(unsafe_binder_ty) => {
+            opaque_use_in_ty(unsafe_binder_ty.inner_ty, opaque_def_id, allow_unsized)
+        }
+        hir::TyKind::Pat(inner, _) => opaque_use_in_ty(inner, opaque_def_id, allow_unsized),
+        _ => None,
+    }
+}
+
+fn opaque_use_in_qpath<'hir>(
+    qpath: &'hir hir::QPath<'hir>,
+    opaque_def_id: DefId,
+    allow_unsized: bool,
+) -> Option<OpaqueUse> {
+    match *qpath {
+        hir::QPath::Resolved(self_ty, path) => {
+            let mut found = None;
+            if let Some(ty) = self_ty {
+                match opaque_use_in_ty(ty, opaque_def_id, allow_unsized) {
+                    Some(OpaqueUse::Direct) => return Some(OpaqueUse::Direct),
+                    Some(OpaqueUse::BehindPointer) => found = Some(OpaqueUse::BehindPointer),
+                    None => {}
+                }
+            }
+            for segment in path.segments {
+                if let Some(args) = segment.args {
+                    match opaque_use_in_generic_args(args, opaque_def_id, allow_unsized) {
+                        Some(OpaqueUse::Direct) => return Some(OpaqueUse::Direct),
+                        Some(OpaqueUse::BehindPointer) => found = Some(OpaqueUse::BehindPointer),
+                        None => {}
+                    }
+                }
+            }
+            found
+        }
+        hir::QPath::TypeRelative(ty, segment) => {
+            let mut found = None;
+            match opaque_use_in_ty(ty, opaque_def_id, allow_unsized) {
+                Some(OpaqueUse::Direct) => return Some(OpaqueUse::Direct),
+                Some(OpaqueUse::BehindPointer) => found = Some(OpaqueUse::BehindPointer),
+                None => {}
+            }
+            if let Some(args) = segment.args {
+                match opaque_use_in_generic_args(args, opaque_def_id, allow_unsized) {
+                    Some(OpaqueUse::Direct) => return Some(OpaqueUse::Direct),
+                    Some(OpaqueUse::BehindPointer) => found = Some(OpaqueUse::BehindPointer),
+                    None => {}
+                }
+            }
+            found
+        }
+    }
+}
+
+fn opaque_use_in_generic_args<'hir>(
+    args: &'hir hir::GenericArgs<'hir>,
+    opaque_def_id: DefId,
+    allow_unsized: bool,
+) -> Option<OpaqueUse> {
+    let mut found = None;
+    for arg in args.args {
+        if let hir::GenericArg::Type(ty) = *arg {
+            match opaque_use_in_ty(ty, opaque_def_id, allow_unsized) {
+                Some(OpaqueUse::Direct) => return Some(OpaqueUse::Direct),
+                Some(OpaqueUse::BehindPointer) => found = Some(OpaqueUse::BehindPointer),
+                None => {}
+            }
+        }
+    }
+    for constraint in args.constraints {
+        match opaque_use_in_generic_args(constraint.gen_args, opaque_def_id, allow_unsized) {
+            Some(OpaqueUse::Direct) => return Some(OpaqueUse::Direct),
+            Some(OpaqueUse::BehindPointer) => found = Some(OpaqueUse::BehindPointer),
+            None => {}
+        }
+        match constraint.kind {
+            hir::AssocItemConstraintKind::Equality { term } => {
+                if let hir::Term::Ty(ty) = term {
+                    match opaque_use_in_ty(ty, opaque_def_id, allow_unsized) {
+                        Some(OpaqueUse::Direct) => return Some(OpaqueUse::Direct),
+                        Some(OpaqueUse::BehindPointer) => found = Some(OpaqueUse::BehindPointer),
+                        None => {}
+                    }
+                }
+            }
+            hir::AssocItemConstraintKind::Bound { bounds } => {
+                match opaque_use_in_bounds(bounds, opaque_def_id, allow_unsized) {
+                    Some(OpaqueUse::Direct) => return Some(OpaqueUse::Direct),
+                    Some(OpaqueUse::BehindPointer) => found = Some(OpaqueUse::BehindPointer),
+                    None => {}
+                }
+            }
+        }
+    }
+    found
+}
+
+fn opaque_use_in_bounds<'hir>(
+    bounds: &'hir [hir::GenericBound<'hir>],
+    opaque_def_id: DefId,
+    allow_unsized: bool,
+) -> Option<OpaqueUse> {
+    let mut found = None;
+    for bound in bounds {
+        match bound {
+            hir::GenericBound::Trait(trait_ref) => {
+                match opaque_use_in_path(&trait_ref.trait_ref.path, opaque_def_id, allow_unsized) {
+                    Some(OpaqueUse::Direct) => return Some(OpaqueUse::Direct),
+                    Some(OpaqueUse::BehindPointer) => found = Some(OpaqueUse::BehindPointer),
+                    None => {}
+                }
+            }
+            hir::GenericBound::Outlives(_) | hir::GenericBound::Use(..) => {}
+        }
+    }
+    found
+}
+
+fn opaque_use_in_poly_trait_refs<'hir>(
+    refs: &'hir [hir::PolyTraitRef<'hir>],
+    opaque_def_id: DefId,
+    allow_unsized: bool,
+) -> Option<OpaqueUse> {
+    let mut found = None;
+    for trait_ref in refs {
+        match opaque_use_in_path(&trait_ref.trait_ref.path, opaque_def_id, allow_unsized) {
+            Some(OpaqueUse::Direct) => return Some(OpaqueUse::Direct),
+            Some(OpaqueUse::BehindPointer) => found = Some(OpaqueUse::BehindPointer),
+            None => {}
+        }
+    }
+    found
+}
+
+fn opaque_use_in_path<'hir>(
+    path: &'hir hir::Path<'hir>,
+    opaque_def_id: DefId,
+    allow_unsized: bool,
+) -> Option<OpaqueUse> {
+    let mut found = None;
+    for segment in path.segments {
+        if let Some(args) = segment.args {
+            match opaque_use_in_generic_args(args, opaque_def_id, allow_unsized) {
+                Some(OpaqueUse::Direct) => return Some(OpaqueUse::Direct),
+                Some(OpaqueUse::BehindPointer) => found = Some(OpaqueUse::BehindPointer),
+                None => {}
+            }
+        }
+    }
+    found
 }
 
 fn param_ty_for_param<'tcx>(
     tcx: TyCtxt<'tcx>,
     owner_def_id: DefId,
     param_def_id: DefId,
-) -> Option<Ty<'tcx>> {
+) -> Option<ParamTy> {
     let generics = tcx.generics_of(owner_def_id);
     let index = generics.param_def_id_to_index(tcx, param_def_id)?;
     let param_def = generics.param_at(index as usize, tcx);
     match param_def.kind {
-        ty::GenericParamDefKind::Type { .. } => Some(ParamTy::for_def(param_def).to_ty(tcx)),
+        ty::GenericParamDefKind::Type { .. } => Some(ParamTy::for_def(param_def)),
         _ => None,
     }
 }

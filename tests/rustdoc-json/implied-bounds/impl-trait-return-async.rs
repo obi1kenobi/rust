@@ -20,8 +20,8 @@ pub async fn async_returns_maybe_unsized() -> impl Debug + ?Sized {
     123
 }
 
-//@ has "$.index[?(@.name=='async_returns_ref')].inner.function.sig.output.borrowed_ref.type.impl_trait.implied_bounds[?(@.trait_bound.trait.path=='Sized' && @.trait_bound.modifier=='none')]"
+//@ !has "$.index[?(@.name=='async_returns_ref')].inner.function.sig.output.borrowed_ref.type.impl_trait.implied_bounds[?(@.trait_bound.trait.path=='Sized' && @.trait_bound.modifier=='none')]"
 //@ !has "$.index[?(@.name=='async_returns_ref')].inner.function.sig.output.borrowed_ref.type.impl_trait.implied_bounds[?(@.trait_bound.modifier=='maybe')]"
 pub async fn async_returns_ref() -> &'static (impl Debug + ?Sized) {
-    Box::leak(Box::new("hello world".to_string()))
+    "hello world"
 }
