@@ -269,11 +269,7 @@ fn clause_to_generic_bound<'tcx>(
 ///
 /// If this function returns `true`, then the given type must be `Sized` since Rust
 /// does not currently support unsized fn parameters or return values.
-fn ty_used_directly_in_fn<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    fn_def_id: DefId,
-    target_ty: Ty<'tcx>,
-) -> bool {
+fn ty_used_directly_in_fn<'tcx>(tcx: TyCtxt<'tcx>, fn_def_id: DefId, target_ty: Ty<'tcx>) -> bool {
     let is_function = matches!(tcx.def_kind(fn_def_id), DefKind::Fn | DefKind::AssocFn);
     if !is_function {
         return false;

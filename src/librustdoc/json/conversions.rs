@@ -12,9 +12,8 @@ use rustc_hir::def::CtorKind;
 use rustc_hir::def_id::DefId;
 use rustc_hir::{HeaderSafety, Safety};
 use rustc_metadata::rendered_const;
-use rustc_middle::bug;
-use rustc_middle::ty;
 use rustc_middle::ty::TyCtxt;
+use rustc_middle::{bug, ty};
 use rustc_span::{Pos, Symbol, kw, sym};
 use rustdoc_json_types::*;
 
@@ -360,42 +359,10 @@ fn from_clean_item(item: &clean::Item, renderer: &JsonRenderer<'_>) -> ItemEnum 
             ItemEnum::Module(Module { is_crate, items: renderer.ids(&m.items), is_stripped: false })
         }
         ImportItem(i) => ItemEnum::Use(i.into_json(renderer)),
-        StructItem(s) => {
-            let has_stripped_fields = s.has_stripped_entries();
-            let kind = match s.ctor_kind {
-                Some(CtorKind::Fn) => StructKind::Tuple(renderer.ids_keeping_stripped(&s.fields)),
-                Some(CtorKind::Const) => {
-                    assert!(s.fields.is_empty());
-                    StructKind::Unit
-                }
-                None => StructKind::Plain { fields: renderer.ids(&s.fields), has_stripped_fields },
-            };
-
-            ItemEnum::Struct(Struct {
-                kind,
-                generics: renderer.generics_into_json(&s.generics, owner_def_id),
-                impls: Vec::new(),
-            })
-        }
-        UnionItem(u) => {
-            let has_stripped_fields = u.has_stripped_entries();
-            ItemEnum::Union(Union {
-                generics: renderer.generics_into_json(&u.generics, owner_def_id),
-                has_stripped_fields,
-                fields: renderer.ids(&u.fields),
-                impls: Vec::new(),
-            })
-        }
+        StructItem(s) => ItemEnum::Struct(from_clean_struct(s, owner_def_id, renderer)),
+        UnionItem(u) => ItemEnum::Union(from_clean_union(u, owner_def_id, renderer)),
         StructFieldItem(f) => ItemEnum::StructField(f.into_json(renderer)),
-        EnumItem(e) => {
-            let has_stripped_variants = e.has_stripped_entries();
-            ItemEnum::Enum(Enum {
-                generics: renderer.generics_into_json(&e.generics, owner_def_id),
-                has_stripped_variants,
-                variants: renderer.ids(&e.variants.as_slice().raw),
-                impls: Vec::new(),
-            })
-        }
+        EnumItem(e) => ItemEnum::Enum(from_clean_enum(e, owner_def_id, renderer)),
         VariantItem(v) => ItemEnum::Variant(v.into_json(renderer)),
         FunctionItem(f) => ItemEnum::Function(from_clean_function(
             f,
@@ -412,10 +379,9 @@ fn from_clean_item(item: &clean::Item, renderer: &JsonRenderer<'_>) -> ItemEnum 
             renderer,
         )),
         TraitItem(t) => ItemEnum::Trait(t.into_json(renderer)),
-        TraitAliasItem(t) => ItemEnum::TraitAlias(TraitAlias {
-            generics: renderer.generics_into_json(&t.generics, owner_def_id),
-            params: t.bounds.into_json(renderer),
-        }),
+        TraitAliasItem(t) => {
+            ItemEnum::TraitAlias(from_clean_trait_alias(t, owner_def_id, renderer))
+        }
         MethodItem(m, _) => ItemEnum::Function(from_clean_function(
             m,
             owner_def_id,
@@ -434,10 +400,7 @@ fn from_clean_item(item: &clean::Item, renderer: &JsonRenderer<'_>) -> ItemEnum 
         StaticItem(s) => ItemEnum::Static(from_clean_static(s, rustc_hir::Safety::Safe, renderer)),
         ForeignStaticItem(s, safety) => ItemEnum::Static(from_clean_static(s, *safety, renderer)),
         ForeignTypeItem => ItemEnum::ExternType,
-        TypeAliasItem(t) => ItemEnum::TypeAlias(TypeAlias {
-            type_: t.type_.into_json(renderer),
-            generics: renderer.generics_into_json(&t.generics, owner_def_id),
-        }),
+        TypeAliasItem(t) => ItemEnum::TypeAlias(from_clean_type_alias(t, owner_def_id, renderer)),
         // FIXME(generic_const_items): Add support for generic free consts
         ConstantItem(ci) => ItemEnum::Constant {
             type_: ci.type_.into_json(renderer),
@@ -498,41 +461,6 @@ fn from_clean_item(item: &clean::Item, renderer: &JsonRenderer<'_>) -> ItemEnum 
     }
 }
 
-impl FromClean<clean::Struct> for Struct {
-    fn from_clean(struct_: &clean::Struct, renderer: &JsonRenderer<'_>) -> Self {
-        let has_stripped_fields = struct_.has_stripped_entries();
-        let clean::Struct { ctor_kind, generics, fields } = struct_;
-
-        let kind = match ctor_kind {
-            Some(CtorKind::Fn) => StructKind::Tuple(renderer.ids_keeping_stripped(fields)),
-            Some(CtorKind::Const) => {
-                assert!(fields.is_empty());
-                StructKind::Unit
-            }
-            None => StructKind::Plain { fields: renderer.ids(fields), has_stripped_fields },
-        };
-
-        Struct {
-            kind,
-            generics: generics.into_json(renderer),
-            impls: Vec::new(), // Added in JsonRenderer::item
-        }
-    }
-}
-
-impl FromClean<clean::Union> for Union {
-    fn from_clean(union_: &clean::Union, renderer: &JsonRenderer<'_>) -> Self {
-        let has_stripped_fields = union_.has_stripped_entries();
-        let clean::Union { generics, fields } = union_;
-        Union {
-            generics: generics.into_json(renderer),
-            has_stripped_fields,
-            fields: renderer.ids(fields),
-            impls: Vec::new(), // Added in JsonRenderer::item
-        }
-    }
-}
-
 impl FromClean<rustc_hir::FnHeader> for FunctionHeader {
     fn from_clean(header: &rustc_hir::FnHeader, renderer: &JsonRenderer<'_>) -> Self {
         let is_unsafe = match header.safety {
@@ -576,15 +504,6 @@ impl FromClean<ExternAbi> for Abi {
 impl FromClean<clean::Lifetime> for String {
     fn from_clean(l: &clean::Lifetime, _renderer: &JsonRenderer<'_>) -> String {
         l.0.to_string()
-    }
-}
-
-impl FromClean<clean::Generics> for Generics {
-    fn from_clean(generics: &clean::Generics, renderer: &JsonRenderer<'_>) -> Self {
-        Generics {
-            params: generics.params.into_json(renderer),
-            where_predicates: generics.where_predicates.into_json(renderer),
-        }
     }
 }
 
@@ -847,6 +766,79 @@ fn from_clean_impl(impl_: &clean::Impl, owner_def_id: DefId, renderer: &JsonRend
     }
 }
 
+fn from_clean_struct(
+    struct_: &clean::Struct,
+    owner_def_id: DefId,
+    renderer: &JsonRenderer<'_>,
+) -> Struct {
+    let has_stripped_fields = struct_.has_stripped_entries();
+    let clean::Struct { ctor_kind, generics, fields } = struct_;
+
+    let kind = match ctor_kind {
+        Some(CtorKind::Fn) => StructKind::Tuple(renderer.ids_keeping_stripped(fields)),
+        Some(CtorKind::Const) => {
+            assert!(fields.is_empty());
+            StructKind::Unit
+        }
+        None => StructKind::Plain { fields: renderer.ids(fields), has_stripped_fields },
+    };
+
+    Struct {
+        kind,
+        generics: renderer.generics_into_json(generics, owner_def_id),
+        impls: Vec::new(), // Added in JsonRenderer::item
+    }
+}
+
+fn from_clean_union(
+    union_: &clean::Union,
+    owner_def_id: DefId,
+    renderer: &JsonRenderer<'_>,
+) -> Union {
+    let has_stripped_fields = union_.has_stripped_entries();
+    let clean::Union { generics, fields } = union_;
+    Union {
+        generics: renderer.generics_into_json(generics, owner_def_id),
+        has_stripped_fields,
+        fields: renderer.ids(fields),
+        impls: Vec::new(), // Added in JsonRenderer::item
+    }
+}
+
+fn from_clean_enum(enum_: &clean::Enum, owner_def_id: DefId, renderer: &JsonRenderer<'_>) -> Enum {
+    let has_stripped_variants = enum_.has_stripped_entries();
+    let clean::Enum { variants, generics } = enum_;
+    Enum {
+        generics: renderer.generics_into_json(generics, owner_def_id),
+        has_stripped_variants,
+        variants: renderer.ids(&variants.as_slice().raw),
+        impls: Vec::new(), // Added in JsonRenderer::item
+    }
+}
+
+fn from_clean_type_alias(
+    type_alias: &clean::TypeAlias,
+    owner_def_id: DefId,
+    renderer: &JsonRenderer<'_>,
+) -> TypeAlias {
+    let clean::TypeAlias { type_, generics, item_type: _, inner_type: _ } = type_alias;
+    TypeAlias {
+        type_: type_.into_json(renderer),
+        generics: renderer.generics_into_json(generics, owner_def_id),
+    }
+}
+
+fn from_clean_trait_alias(
+    alias: &clean::TraitAlias,
+    owner_def_id: DefId,
+    renderer: &JsonRenderer<'_>,
+) -> TraitAlias {
+    TraitAlias {
+        generics: renderer.generics_into_json(&alias.generics, owner_def_id),
+        params: alias.bounds.into_json(renderer),
+    }
+}
+
 impl FromClean<clean::Trait> for Trait {
     fn from_clean(trait_: &clean::Trait, renderer: &JsonRenderer<'_>) -> Self {
         let tcx = renderer.tcx;
@@ -878,38 +870,6 @@ impl FromClean<clean::PolyTrait> for PolyTrait {
     }
 }
 
-impl FromClean<clean::Impl> for Impl {
-    fn from_clean(impl_: &clean::Impl, renderer: &JsonRenderer<'_>) -> Self {
-        let provided_trait_methods = impl_.provided_trait_methods(renderer.tcx);
-        let clean::Impl { safety, generics, trait_, for_, items, polarity, kind, is_deprecated: _ } =
-            impl_;
-        // FIXME: use something like ImplKind in JSON?
-        let (is_synthetic, blanket_impl) = match kind {
-            clean::ImplKind::Normal | clean::ImplKind::FakeVariadic => (false, None),
-            clean::ImplKind::Auto => (true, None),
-            clean::ImplKind::Blanket(ty) => (false, Some(ty)),
-        };
-        let is_negative = match polarity {
-            ty::ImplPolarity::Positive | ty::ImplPolarity::Reservation => false,
-            ty::ImplPolarity::Negative => true,
-        };
-        Impl {
-            is_unsafe: safety.is_unsafe(),
-            generics: generics.into_json(renderer),
-            provided_trait_methods: provided_trait_methods
-                .into_iter()
-                .map(|x| x.to_string())
-                .collect(),
-            trait_: trait_.into_json(renderer),
-            for_: for_.into_json(renderer),
-            items: renderer.ids(items),
-            is_negative,
-            is_synthetic,
-            blanket_impl: blanket_impl.map(|x| x.into_json(renderer)),
-        }
-    }
-}
-
 pub(crate) fn from_clean_function(
     clean::Function { decl, generics }: &clean::Function,
     owner_def_id: DefId,
@@ -922,19 +882,6 @@ pub(crate) fn from_clean_function(
         generics: renderer.generics_into_json(generics, owner_def_id),
         header: header.into_json(renderer),
         has_body,
-    }
-}
-
-impl FromClean<clean::Enum> for Enum {
-    fn from_clean(enum_: &clean::Enum, renderer: &JsonRenderer<'_>) -> Self {
-        let has_stripped_variants = enum_.has_stripped_entries();
-        let clean::Enum { variants, generics } = enum_;
-        Enum {
-            generics: generics.into_json(renderer),
-            has_stripped_variants,
-            variants: renderer.ids(&variants.as_slice().raw),
-            impls: Vec::new(), // Added in JsonRenderer::item
-        }
     }
 }
 
@@ -1006,13 +953,6 @@ impl FromClean<rustc_span::hygiene::MacroKind> for MacroKind {
     }
 }
 
-impl FromClean<clean::TypeAlias> for TypeAlias {
-    fn from_clean(type_alias: &clean::TypeAlias, renderer: &JsonRenderer<'_>) -> Self {
-        let clean::TypeAlias { type_, generics, item_type: _, inner_type: _ } = type_alias;
-        TypeAlias { type_: type_.into_json(renderer), generics: generics.into_json(renderer) }
-    }
-}
-
 fn from_clean_static(
     stat: &clean::Static,
     safety: rustc_hir::Safety,
@@ -1027,15 +967,6 @@ fn from_clean_static(
             .expr
             .map(|e| rendered_const(tcx, tcx.hir_body(e), tcx.hir_body_owner_def_id(e)))
             .unwrap_or_default(),
-    }
-}
-
-impl FromClean<clean::TraitAlias> for TraitAlias {
-    fn from_clean(alias: &clean::TraitAlias, renderer: &JsonRenderer<'_>) -> Self {
-        TraitAlias {
-            generics: alias.generics.into_json(renderer),
-            params: alias.bounds.into_json(renderer),
-        }
     }
 }
 
