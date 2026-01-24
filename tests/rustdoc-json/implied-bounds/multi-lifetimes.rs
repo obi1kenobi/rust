@@ -20,7 +20,9 @@ pub struct OutlivePair<'a, 'b: 'a, T>(&'a T, &'b T);
 
 //@ is   "$.index[?(@.name=='require_outlive_pair')].inner.function.generics.params[1].name" \"\'b\"
 //@ is   "$.index[?(@.name=='require_outlive_pair')].inner.function.generics.params[2].name" '"T"'
-// TODO: enable this: //@ is   "$.index[?(@.name=='require_outlive_pair')].inner.function.generics.params[1].kind.lifetime.implicitly_outlives" '["\'a"]'
+// FIXME: Eventually we also want `implied_bounds` on lifetimes too. When implemented,
+// enable the following test too:
+// - @ is   "$.index[?(@.name=='require_outlive_pair')].inner.function.generics.params[1].kind.lifetime.implied_bounds" '["\'a"]'
 //@ has  "$.index[?(@.name=='require_outlive_pair')].inner.function.generics.params[2].kind.type.implied_bounds[?(@.outlives==\"'a\")]"
 //@ has  "$.index[?(@.name=='require_outlive_pair')].inner.function.generics.params[2].kind.type.implied_bounds[?(@.outlives==\"'b\")]"
 //@ has  "$.index[?(@.name=='require_outlive_pair')].inner.function.generics.params[2].kind.type.implied_bounds[?(@.trait_bound.trait.path=='Sized' && @.trait_bound.modifier=='none')]"
