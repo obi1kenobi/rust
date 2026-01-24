@@ -1,4 +1,4 @@
-use rustc_data_structures::fx::{FxHashSet, FxIndexSet};
+use rustc_data_structures::fx::FxHashSet;
 use rustc_hir::LangItem;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
@@ -19,9 +19,7 @@ pub(crate) fn implied_bounds_for_ty<'tcx>(
     explicit_bounds: &[GenericBound],
     renderer: &JsonRenderer<'tcx>,
 ) -> Vec<GenericBound> {
-    let mut bounds =
-        FxIndexSet::with_capacity_and_hasher(explicit_bounds.len(), Default::default());
-    bounds.extend(explicit_bounds.iter().cloned());
+    let mut seen: FxHashSet<_> = explicit_bounds.iter().cloned().collect();
 
     let explicit_trait_bounds: FxHashSet<_> = explicit_bounds
         .iter()
@@ -31,7 +29,8 @@ pub(crate) fn implied_bounds_for_ty<'tcx>(
         })
         .collect();
 
-    let mut added_sized_bound = false;
+    let mut implied_bounds = Vec::new();
+    let mut added_sized_bound = explicit_bounds.iter().any(|bound| is_sized_bound(bound, renderer));
     for clause in clauses {
         if !clause_targets_ty(*clause, target_ty) {
             continue;
@@ -42,7 +41,9 @@ pub(crate) fn implied_bounds_for_ty<'tcx>(
                 added_sized_bound = true;
             }
 
-            bounds.insert(bound);
+            if seen.insert(bound.clone()) {
+                implied_bounds.push(bound);
+            }
         }
     }
 
@@ -58,11 +59,13 @@ pub(crate) fn implied_bounds_for_ty<'tcx>(
                 generic_params: Vec::new(),
                 modifier: TraitBoundModifier::None,
             };
-            bounds.insert(sized_bound);
+            if seen.insert(sized_bound.clone()) {
+                implied_bounds.push(sized_bound);
+            }
         }
     }
 
-    bounds.into_iter().skip(explicit_bounds.len()).collect()
+    implied_bounds
 }
 
 pub(crate) fn implied_bounds_for_type_param<'tcx>(

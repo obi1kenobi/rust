@@ -17,6 +17,17 @@ impl<T: 'static> OtherStatic for T {}
 //@ !has "$.index[?(@.name=='duplicate_generic_sized')].inner.function.generics.params[0].kind.type.implied_bounds[*]"
 pub fn duplicate_generic_sized<T: SizedOnly + Sized>(_t: T) {}
 
+//@ has "$.index[?(@.name=='duplicate_where_bounds_only')]"
+//@ count "$.index[?(@.name=='duplicate_where_bounds_only')].inner.function.generics.params[0].kind.type.bounds[*]" 0
+//@ count "$.index[?(@.name=='duplicate_where_bounds_only')].inner.function.generics.where_predicates[0].bound_predicate.bounds[?(@.trait_bound.trait.path=='SizedOnly')]" 2
+//@ count "$.index[?(@.name=='duplicate_where_bounds_only')].inner.function.generics.params[0].kind.type.implied_bounds[*]" 1
+//@ has  "$.index[?(@.name=='duplicate_where_bounds_only')].inner.function.generics.params[0].kind.type.implied_bounds[?(@.trait_bound.trait.path=='Sized')]"
+pub fn duplicate_where_bounds_only<T>(_t: T)
+where
+    T: SizedOnly + SizedOnly,
+{
+}
+
 //@ has "$.index[?(@.name=='duplicate_generic_static')]"
 //@ count "$.index[?(@.name=='duplicate_generic_static')].inner.function.generics.params[0].kind.type.bounds[*]" 2
 //@ has  "$.index[?(@.name=='duplicate_generic_static')].inner.function.generics.params[0].kind.type.bounds[?(@.trait_bound.trait.path=='StaticOnly')]"
