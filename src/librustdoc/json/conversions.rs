@@ -8,17 +8,14 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::thin_vec::ThinVec;
 use rustc_hir as hir;
 use rustc_hir::attrs::{self, DeprecatedSince, DocAttribute, DocInline, HideOrShow};
-use rustc_hir::def::{CtorKind, DefKind};
+use rustc_hir::def::CtorKind;
 use rustc_hir::def_id::DefId;
 use rustc_hir::{HeaderSafety, Safety};
 use rustc_metadata::rendered_const;
-use rustc_middle::ty::TyCtxt;
 use rustc_middle::bug;
-use rustc_middle::ty::{self, AliasTy, ParamTy, Ty, TyCtxt, TypingMode};
+use rustc_middle::ty;
+use rustc_middle::ty::TyCtxt;
 use rustc_span::{Pos, Symbol, kw, sym};
-use rustc_trait_selection::infer::TyCtxtInferExt;
-use rustc_trait_selection::infer::outlives::env::OutlivesEnvironment;
-use rustc_trait_selection::regions::OutlivesEnvironmentBuildExt;
 use rustdoc_json_types::*;
 
 use crate::clean::{self, ItemId};
@@ -829,7 +826,7 @@ impl FromClean<clean::FnDecl> for FunctionSignature {
 
 fn from_clean_impl(impl_: &clean::Impl, owner_def_id: DefId, renderer: &JsonRenderer<'_>) -> Impl {
     let provided_trait_methods = impl_.provided_trait_methods(renderer.tcx);
-    let clean::Impl { safety, generics, trait_, for_, items, polarity, kind } = impl_;
+    let clean::Impl { safety, generics, trait_, for_, items, polarity, kind, .. } = impl_;
     // FIXME: use something like ImplKind in JSON?
     let (is_synthetic, blanket_impl) = match kind {
         clean::ImplKind::Normal | clean::ImplKind::FakeVariadic => (false, None),

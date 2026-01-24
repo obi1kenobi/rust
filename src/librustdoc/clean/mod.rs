@@ -43,7 +43,6 @@ use rustc_hir::attrs::{AttributeKind, DocAttribute, DocInline};
 use rustc_hir::def::{CtorKind, DefKind, MacroKinds, Res};
 use rustc_hir::def_id::{DefId, DefIdMap, DefIdSet, LOCAL_CRATE, LocalDefId};
 use rustc_hir::{LangItem, OpaqueTyOrigin, PredicateOrigin, find_attr};
-use rustc_hir_analysis::hir_ty_lowering::FeedConstTy;
 use rustc_hir_analysis::{lower_const_arg_for_rustdoc, lower_ty};
 use rustc_middle::metadata::Reexport;
 use rustc_middle::middle::resolve_bound_vars as rbv;
@@ -51,7 +50,7 @@ use rustc_middle::ty::{self, AdtKind, GenericArgsRef, Ty, TyCtxt, TypeVisitableE
 use rustc_middle::{bug, span_bug};
 use rustc_span::ExpnKind;
 use rustc_span::hygiene::{AstPass, MacroKind};
-use rustc_span::symbol::{Ident, Symbol, kw, sym};
+use rustc_span::symbol::{Ident, Symbol, kw};
 use rustc_trait_selection::traits::wf::object_region_bounds;
 use tracing::{debug, instrument};
 use utils::*;
