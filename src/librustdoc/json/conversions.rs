@@ -454,6 +454,12 @@ impl FromClean<clean::GenericParamDefKind> for GenericParamDefKind {
             }
             Type { bounds, default, synthetic } => GenericParamDefKind::Type {
                 bounds: bounds.into_json(renderer),
+                // This path is only hit when we aren't going through `from_clean_generics()`,
+                // i.e. we're processing cases like HRTB binders or function-pointer generic params.
+                //
+                // Non-lifetime binders don't currently allow bounds on type parameters, and
+                // late-bound type params are rejected on function pointers. That leaves no
+                // place for implied bounds to come from, as of today's version of Rust.
                 implied_bounds: Vec::new(),
                 default: default.into_json(renderer),
                 is_synthetic: *synthetic,
