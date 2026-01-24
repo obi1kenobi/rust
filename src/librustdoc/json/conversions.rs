@@ -103,77 +103,6 @@ impl JsonRenderer<'_> {
             })
             .collect()
     }
-
-    fn generics_into_json(&self, generics: &clean::Generics, owner_def_id: DefId) -> Generics {
-        let mut param_by_name = FxHashMap::default();
-        let mut param_bounds: FxHashMap<_, Vec<GenericBound>> = FxHashMap::default();
-        let mut explicit_bounds: FxHashMap<_, Vec<GenericBound>> = FxHashMap::default();
-
-        for param in &generics.params {
-            if let clean::GenericParamDefKind::Type { bounds, .. } = &param.kind {
-                let bounds_json: Vec<GenericBound> = bounds.into_json(self);
-                param_by_name.insert(param.name, param.def_id);
-                explicit_bounds.entry(param.def_id).or_default().extend(bounds_json.clone());
-                param_bounds.insert(param.def_id, bounds_json);
-            }
-        }
-
-        for predicate in &generics.where_predicates {
-            if let clean::WherePredicate::BoundPredicate {
-                ty: clean::Type::Generic(name),
-                bounds,
-                ..
-            } = predicate
-                && let Some(def_id) = param_by_name.get(name)
-            {
-                let where_bounds: Vec<GenericBound> = bounds.into_json(self);
-                explicit_bounds.entry(*def_id).or_default().extend(where_bounds);
-            }
-        }
-
-        let params = generics
-            .params
-            .iter()
-            .map(|param| match &param.kind {
-                clean::GenericParamDefKind::Lifetime { outlives } => GenericParamDef {
-                    name: param.name.to_string(),
-                    kind: GenericParamDefKind::Lifetime { outlives: outlives.into_json(self) },
-                },
-                clean::GenericParamDefKind::Type { bounds, default, synthetic } => {
-                    let bounds_json = param_bounds
-                        .remove(&param.def_id)
-                        .unwrap_or_else(|| bounds.into_json(self));
-                    let explicit_bounds = explicit_bounds
-                        .remove(&param.def_id)
-                        .unwrap_or_else(|| bounds_json.clone());
-                    let implied_bounds = implied_bounds_for_type_param(
-                        owner_def_id,
-                        param.def_id,
-                        &explicit_bounds,
-                        self,
-                    );
-                    GenericParamDef {
-                        name: param.name.to_string(),
-                        kind: GenericParamDefKind::Type {
-                            bounds: bounds_json,
-                            implied_bounds,
-                            default: default.into_json(self),
-                            is_synthetic: *synthetic,
-                        },
-                    }
-                }
-                clean::GenericParamDefKind::Const { ty, default } => GenericParamDef {
-                    name: param.name.to_string(),
-                    kind: GenericParamDefKind::Const {
-                        type_: ty.into_json(self),
-                        default: default.as_ref().map(|x| x.as_ref().clone()),
-                    },
-                },
-            })
-            .collect();
-
-        Generics { params, where_predicates: generics.where_predicates.into_json(self) }
-    }
 }
 
 pub(crate) trait FromClean<T> {
@@ -426,7 +355,7 @@ fn from_clean_item(item: &clean::Item, renderer: &JsonRenderer<'_>) -> ItemEnum 
         RequiredAssocTypeItem(generics, bounds) => {
             let bounds_json: Vec<GenericBound> = bounds.into_json(renderer);
             ItemEnum::AssocType {
-                generics: renderer.generics_into_json(generics, owner_def_id),
+                generics: from_clean_generics(generics, owner_def_id, renderer),
                 bounds: bounds_json.clone(),
                 implied_bounds: implied_bounds_for_assoc_type(owner_def_id, &bounds_json, renderer),
                 type_: None,
@@ -435,7 +364,7 @@ fn from_clean_item(item: &clean::Item, renderer: &JsonRenderer<'_>) -> ItemEnum 
         AssocTypeItem(ty, bounds) => {
             let bounds_json: Vec<GenericBound> = bounds.into_json(renderer);
             ItemEnum::AssocType {
-                generics: renderer.generics_into_json(&ty.generics, owner_def_id),
+                generics: from_clean_generics(&ty.generics, owner_def_id, renderer),
                 bounds: bounds_json.clone(),
                 implied_bounds: implied_bounds_for_assoc_type(owner_def_id, &bounds_json, renderer),
                 type_: Some(ty.item_type.as_ref().unwrap_or(&ty.type_).into_json(renderer)),
@@ -743,6 +672,78 @@ impl FromClean<clean::FnDecl> for FunctionSignature {
     }
 }
 
+fn from_clean_generics(
+    generics: &clean::Generics,
+    owner_def_id: DefId,
+    renderer: &JsonRenderer<'_>,
+) -> Generics {
+    let mut param_by_name = FxHashMap::default();
+    let mut param_bounds: FxHashMap<_, Vec<GenericBound>> = FxHashMap::default();
+    let mut explicit_bounds: FxHashMap<_, Vec<GenericBound>> = FxHashMap::default();
+
+    for param in &generics.params {
+        if let clean::GenericParamDefKind::Type { bounds, .. } = &param.kind {
+            let bounds_json: Vec<GenericBound> = bounds.into_json(renderer);
+            param_by_name.insert(param.name, param.def_id);
+            explicit_bounds.entry(param.def_id).or_default().extend(bounds_json.clone());
+            param_bounds.insert(param.def_id, bounds_json);
+        }
+    }
+
+    for predicate in &generics.where_predicates {
+        if let clean::WherePredicate::BoundPredicate {
+            ty: clean::Type::Generic(name), bounds, ..
+        } = predicate
+            && let Some(def_id) = param_by_name.get(name)
+        {
+            let where_bounds: Vec<GenericBound> = bounds.into_json(renderer);
+            explicit_bounds.entry(*def_id).or_default().extend(where_bounds);
+        }
+    }
+
+    let params = generics
+        .params
+        .iter()
+        .map(|param| match &param.kind {
+            clean::GenericParamDefKind::Lifetime { outlives } => GenericParamDef {
+                name: param.name.to_string(),
+                kind: GenericParamDefKind::Lifetime { outlives: outlives.into_json(renderer) },
+            },
+            clean::GenericParamDefKind::Type { bounds, default, synthetic } => {
+                let bounds_json = param_bounds
+                    .remove(&param.def_id)
+                    .unwrap_or_else(|| bounds.into_json(renderer));
+                let explicit_bounds =
+                    explicit_bounds.remove(&param.def_id).unwrap_or_else(|| bounds_json.clone());
+                let implied_bounds = implied_bounds_for_type_param(
+                    owner_def_id,
+                    param.def_id,
+                    &explicit_bounds,
+                    renderer,
+                );
+                GenericParamDef {
+                    name: param.name.to_string(),
+                    kind: GenericParamDefKind::Type {
+                        bounds: bounds_json,
+                        implied_bounds,
+                        default: default.into_json(renderer),
+                        is_synthetic: *synthetic,
+                    },
+                }
+            }
+            clean::GenericParamDefKind::Const { ty, default } => GenericParamDef {
+                name: param.name.to_string(),
+                kind: GenericParamDefKind::Const {
+                    type_: ty.into_json(renderer),
+                    default: default.as_ref().map(|x| x.as_ref().clone()),
+                },
+            },
+        })
+        .collect();
+
+    Generics { params, where_predicates: generics.where_predicates.into_json(renderer) }
+}
+
 fn from_clean_impl(impl_: &clean::Impl, owner_def_id: DefId, renderer: &JsonRenderer<'_>) -> Impl {
     let provided_trait_methods = impl_.provided_trait_methods(renderer.tcx);
     let clean::Impl { safety, generics, trait_, for_, items, polarity, kind, .. } = impl_;
@@ -755,7 +756,7 @@ fn from_clean_impl(impl_: &clean::Impl, owner_def_id: DefId, renderer: &JsonRend
     let is_negative = matches!(polarity, ty::ImplPolarity::Negative);
     Impl {
         is_unsafe: safety.is_unsafe(),
-        generics: renderer.generics_into_json(generics, owner_def_id),
+        generics: from_clean_generics(generics, owner_def_id, renderer),
         provided_trait_methods: provided_trait_methods.into_iter().map(|x| x.to_string()).collect(),
         trait_: trait_.into_json(renderer),
         for_: for_.into_json(renderer),
@@ -785,7 +786,7 @@ fn from_clean_struct(
 
     Struct {
         kind,
-        generics: renderer.generics_into_json(generics, owner_def_id),
+        generics: from_clean_generics(generics, owner_def_id, renderer),
         impls: Vec::new(), // Added in JsonRenderer::item
     }
 }
@@ -798,7 +799,7 @@ fn from_clean_union(
     let has_stripped_fields = union_.has_stripped_entries();
     let clean::Union { generics, fields } = union_;
     Union {
-        generics: renderer.generics_into_json(generics, owner_def_id),
+        generics: from_clean_generics(generics, owner_def_id, renderer),
         has_stripped_fields,
         fields: renderer.ids(fields),
         impls: Vec::new(), // Added in JsonRenderer::item
@@ -809,7 +810,7 @@ fn from_clean_enum(enum_: &clean::Enum, owner_def_id: DefId, renderer: &JsonRend
     let has_stripped_variants = enum_.has_stripped_entries();
     let clean::Enum { variants, generics } = enum_;
     Enum {
-        generics: renderer.generics_into_json(generics, owner_def_id),
+        generics: from_clean_generics(generics, owner_def_id, renderer),
         has_stripped_variants,
         variants: renderer.ids(&variants.as_slice().raw),
         impls: Vec::new(), // Added in JsonRenderer::item
@@ -824,7 +825,7 @@ fn from_clean_type_alias(
     let clean::TypeAlias { type_, generics, item_type: _, inner_type: _ } = type_alias;
     TypeAlias {
         type_: type_.into_json(renderer),
-        generics: renderer.generics_into_json(generics, owner_def_id),
+        generics: from_clean_generics(generics, owner_def_id, renderer),
     }
 }
 
@@ -834,7 +835,7 @@ fn from_clean_trait_alias(
     renderer: &JsonRenderer<'_>,
 ) -> TraitAlias {
     TraitAlias {
-        generics: renderer.generics_into_json(&alias.generics, owner_def_id),
+        generics: from_clean_generics(&alias.generics, owner_def_id, renderer),
         params: alias.bounds.into_json(renderer),
     }
 }
@@ -851,7 +852,7 @@ impl FromClean<clean::Trait> for Trait {
             is_unsafe,
             is_dyn_compatible,
             items: renderer.ids(items),
-            generics: renderer.generics_into_json(generics, *def_id),
+            generics: from_clean_generics(generics, *def_id, renderer),
             bounds: bounds.into_json(renderer),
             implementations: Vec::new(), // Added in JsonRenderer::item
         }
@@ -879,7 +880,7 @@ pub(crate) fn from_clean_function(
 ) -> Function {
     Function {
         sig: decl.into_json(renderer),
-        generics: renderer.generics_into_json(generics, owner_def_id),
+        generics: from_clean_generics(generics, owner_def_id, renderer),
         header: header.into_json(renderer),
         has_body,
     }
