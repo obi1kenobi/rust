@@ -352,7 +352,8 @@ fn clause_to_generic_bound<'tcx>(
         }
 
         let poly_trait_ref = trait_clause.map_bound(|pred| pred.trait_ref);
-        let constraints = assoc_item_constraints_for_trait_ref(all_clauses, poly_trait_ref, clean_cx);
+        let constraints =
+            assoc_item_constraints_for_trait_ref(all_clauses, poly_trait_ref, clean_cx);
         let clean_path =
             clean::clean_trait_ref_with_constraints(clean_cx, poly_trait_ref, constraints);
         let path = clean_path.into_json(renderer);

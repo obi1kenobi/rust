@@ -14,11 +14,18 @@ pub trait GuardOther {
     type Item;
 }
 pub trait GuardCombo<T>: GuardBase + GuardOther<Item = T> {}
+pub trait SendOnly: Send {}
 
 // `T: Bar<u8>` is implied via `Foo<T>: Bar<T>`.
 //@ has "$.index[?(@.name=='implied_bound_args')].inner.function.generics.params[0].kind.type.bounds[?(@.trait_bound.trait.path=='Foo' && @.trait_bound.trait.args.angle_bracketed.args[0].type.primitive=='u8')]"
 //@ has "$.index[?(@.name=='implied_bound_args')].inner.function.generics.params[0].kind.type.implied_bounds[?(@.trait_bound.trait.path=='Bar' && @.trait_bound.trait.args.angle_bracketed.args[0].type.primitive=='u8')]"
 pub fn implied_bound_args<T: Foo<u8>>(value: T) {
+    let _ = value;
+}
+
+// `T: Send` is implied via `SendOnly: Send`.
+//@ has "$.index[?(@.name=='implied_bound_send')].inner.function.generics.params[0].kind.type.implied_bounds[?(@.trait_bound.trait.path=='Send')]"
+pub fn implied_bound_send<T: SendOnly>(value: T) {
     let _ = value;
 }
 
