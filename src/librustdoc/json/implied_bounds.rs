@@ -1,4 +1,5 @@
 use rustc_data_structures::fx::FxHashSet;
+use rustc_data_structures::thin_vec::ThinVec;
 use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
@@ -11,13 +12,18 @@ use rustc_trait_selection::regions::OutlivesEnvironmentBuildExt;
 use rustdoc_json_types::{GenericBound, Id, Path, TraitBoundModifier};
 
 use crate::clean;
+use crate::config::OutputFormat;
+use crate::core::DocContext;
+use crate::formats::cache::Cache;
 use crate::json::JsonRenderer;
+use crate::json::conversions::IntoJson;
 
 pub(crate) fn implied_bounds_for_ty<'tcx>(
     target_ty: Ty<'tcx>,
     clauses: &[ty::Clause<'tcx>],
     implicitly_sized: bool,
     explicit_bounds: &[GenericBound],
+    owner_def_id: DefId,
     renderer: &JsonRenderer<'tcx>,
 ) -> Vec<GenericBound> {
     let mut seen: FxHashSet<_> = explicit_bounds.iter().cloned().collect();
@@ -32,12 +38,19 @@ pub(crate) fn implied_bounds_for_ty<'tcx>(
 
     let mut implied_bounds = Vec::new();
     let mut added_sized_bound = explicit_bounds.iter().any(|bound| is_sized_bound(bound, renderer));
+    let mut clean_cx = implied_bounds_doc_context(renderer, owner_def_id);
     for clause in clauses {
         if !clause_targets_ty(*clause, target_ty) {
             continue;
         }
 
-        if let Some(bound) = clause_to_generic_bound(*clause, &explicit_trait_bounds, renderer) {
+        if let Some(bound) = clause_to_generic_bound(
+            *clause,
+            clauses,
+            &explicit_trait_bounds,
+            &mut clean_cx,
+            renderer,
+        ) {
             if is_sized_bound(&bound, renderer) {
                 added_sized_bound = true;
             }
@@ -90,6 +103,7 @@ pub(crate) fn implied_bounds_for_type_param<'tcx>(
         clauses.as_slice(),
         implicitly_sized,
         explicit_bounds,
+        owner_def_id,
         renderer,
     );
 
@@ -125,7 +139,14 @@ pub(crate) fn implied_bounds_for_assoc_type<'tcx>(
     );
     let clauses = renderer.tcx.item_bounds(assoc_def_id).instantiate(renderer.tcx, args);
     let allows_unsized = explicit_bounds.iter().any(|bound| is_maybe_sized_bound(bound, renderer));
-    implied_bounds_for_ty(target_ty, &clauses, !allows_unsized, explicit_bounds, renderer)
+    implied_bounds_for_ty(
+        target_ty,
+        &clauses,
+        !allows_unsized,
+        explicit_bounds,
+        assoc_def_id,
+        renderer,
+    )
 }
 
 pub(crate) fn implied_bounds_for_impl_trait<'tcx>(
@@ -166,6 +187,7 @@ pub(crate) fn implied_bounds_for_impl_trait<'tcx>(
                 &clauses,
                 implicitly_sized,
                 explicit_bounds,
+                *def_id,
                 renderer,
             );
 
@@ -182,6 +204,52 @@ pub(crate) fn implied_bounds_for_impl_trait<'tcx>(
 
             implied_bounds
         }
+    }
+}
+
+/// Build a minimal `DocContext` for implied-bounds rendering.
+///
+/// This is intentionally a narrow, JSON-only shim that lets us reuse existing `clean::*`
+/// conversion helpers when turning `ty::Clause` data into `rustdoc_json_types`:
+/// - The implied-bounds logic starts from `ty::Clause` (param-env predicates) rather than
+///   from HIR, so we don't have a preexisting clean representation to convert.
+/// - The relevant clean helpers ([`crate::clean::clean_trait_ref_with_constraints`],
+///   [`crate::clean::projection_to_path_segment`], [`crate::clean::clean_middle_term`],
+///   [`crate::clean::clean_bound_vars`]) require a `DocContext` to access `tcx`, `param_env`, and
+///   path/generic normalization logic. We don't want to duplicate them here.
+///
+/// This context is read-only and intentionally minimal: it only carries the fields needed by
+/// the clean helpers above (e.g., `tcx`, `param_env`, `auto_traits`, and a fresh `Cache` to
+/// satisfy path lookups). It does not run passes, does not mutate global caches, and does not
+/// depend on the rest of the cleaning pipeline.
+///
+/// If this ever shows up as a hot path or becomes too heavyweight, the alternatives are:
+/// - reimplement the clean logic directly in JSON and accept some duplication;
+/// - move implied-bounds computation into `clean` itself, making it shared with rustdoc HTML, or
+/// - refactor JSON rendering to get access to the main `DocContext`.
+fn implied_bounds_doc_context<'tcx>(
+    renderer: &JsonRenderer<'tcx>,
+    owner_def_id: DefId,
+) -> DocContext<'tcx> {
+    let auto_traits = renderer
+        .tcx
+        .visible_traits()
+        .filter(|&trait_def_id| renderer.tcx.trait_is_auto(trait_def_id))
+        .collect();
+    DocContext {
+        tcx: renderer.tcx,
+        param_env: renderer.tcx.param_env(owner_def_id),
+        external_traits: Default::default(),
+        active_extern_traits: Default::default(),
+        args: Default::default(),
+        current_type_aliases: Default::default(),
+        impl_trait_bounds: Default::default(),
+        generated_synthetics: Default::default(),
+        auto_traits,
+        cache: Cache::new(renderer.cache.document_private, renderer.cache.document_hidden),
+        inlined: Default::default(),
+        output_format: OutputFormat::Json,
+        show_coverage: false,
     }
 }
 
@@ -219,7 +287,9 @@ fn clause_targets_ty<'tcx>(clause: ty::Clause<'tcx>, target: Ty<'tcx>) -> bool {
 
 fn clause_to_generic_bound<'tcx>(
     clause: ty::Clause<'tcx>,
+    all_clauses: &[ty::Clause<'tcx>],
     explicit_trait_bounds: &FxHashSet<(Id, TraitBoundModifier)>,
+    clean_cx: &mut DocContext<'tcx>,
     renderer: &JsonRenderer<'tcx>,
 ) -> Option<GenericBound> {
     if let Some(trait_clause) = clause.as_trait_clause() {
@@ -281,13 +351,15 @@ fn clause_to_generic_bound<'tcx>(
             Some(_) => return None,
         }
 
-        let path = Path { path: renderer.tcx.item_name(def_id).to_string(), id, args: None };
+        let poly_trait_ref = trait_clause.map_bound(|pred| pred.trait_ref);
+        let constraints = assoc_item_constraints_for_trait_ref(all_clauses, poly_trait_ref, clean_cx);
+        let clean_path =
+            clean::clean_trait_ref_with_constraints(clean_cx, poly_trait_ref, constraints);
+        let path = clean_path.into_json(renderer);
+        let generic_params =
+            clean::clean_bound_vars(trait_clause.bound_vars(), clean_cx).into_json(renderer);
 
-        return Some(GenericBound::TraitBound {
-            trait_: path,
-            generic_params: Vec::new(),
-            modifier,
-        });
+        return Some(GenericBound::TraitBound { trait_: path, generic_params, modifier });
     }
 
     if let Some(type_outlives) = clause.as_type_outlives_clause() {
@@ -298,6 +370,60 @@ fn clause_to_generic_bound<'tcx>(
     }
 
     None
+}
+
+fn assoc_item_constraints_for_trait_ref<'tcx>(
+    clauses: &[ty::Clause<'tcx>],
+    poly_trait_ref: ty::Binder<'tcx, ty::TraitRef<'tcx>>,
+    clean_cx: &mut DocContext<'tcx>,
+) -> ThinVec<clean::AssocItemConstraint> {
+    clauses
+        .iter()
+        .filter_map(|clause| {
+            let proj_clause = clause.as_projection_clause()?;
+            let proj_pred = proj_clause.skip_binder();
+            let proj_trait_ref = proj_pred.projection_term.trait_ref(clean_cx.tcx);
+            if !projection_applies_to_trait_ref(clean_cx.tcx, proj_trait_ref, poly_trait_ref) {
+                return None;
+            }
+            Some(clean::AssocItemConstraint {
+                assoc: clean::projection_to_path_segment(
+                    proj_clause.map_bound(|pred| pred.projection_term),
+                    clean_cx,
+                ),
+                kind: clean::AssocItemConstraintKind::Equality {
+                    term: clean::clean_middle_term(
+                        proj_clause.map_bound(|pred| pred.term),
+                        clean_cx,
+                    ),
+                },
+            })
+        })
+        .collect()
+}
+
+fn projection_applies_to_trait_ref<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    proj_trait_ref: ty::TraitRef<'tcx>,
+    trait_ref: ty::Binder<'tcx, ty::TraitRef<'tcx>>,
+) -> bool {
+    if proj_trait_ref == trait_ref.skip_binder() {
+        return true;
+    }
+
+    let Some(fn_once_trait) = tcx.lang_items().fn_once_trait() else { return false };
+    if proj_trait_ref.def_id != fn_once_trait {
+        return false;
+    }
+
+    let Some(fn_trait) = tcx.lang_items().fn_trait() else { return false };
+    let Some(fn_mut_trait) = tcx.lang_items().fn_mut_trait() else { return false };
+    let trait_def_id = trait_ref.skip_binder().def_id;
+    if trait_def_id != fn_trait && trait_def_id != fn_mut_trait {
+        return false;
+    }
+
+    proj_trait_ref.args == trait_ref.skip_binder().args
 }
 
 /// Returns `true` if the function signature requires the type parameter to be `Sized`.
@@ -665,7 +791,15 @@ fn implied_outlives_bounds_for_opaque<'tcx>(
         return Vec::new();
     }
 
-    let OpaqueTyOrigin::TyAlias { parent, .. } = tcx.opaque_ty_origin(opaque_def_id) else {
+    let Some(local_def_id) = opaque_def_id.as_local() else {
+        // Cross-crate TAITs don't carry the parent WF info in metadata,
+        // so we can't infer outlives bounds here.
+        // FIXME: Get metadata on extern opaques, then make this precise.
+        return Vec::new();
+    };
+
+    let OpaqueTyOrigin::TyAlias { parent, .. } = tcx.opaque_ty_origin(local_def_id.to_def_id())
+    else {
         return Vec::new();
     };
 

@@ -458,7 +458,7 @@ fn clean_type_outlives_predicate<'tcx>(
     }
 }
 
-fn clean_middle_term<'tcx>(
+pub(crate) fn clean_middle_term<'tcx>(
     term: ty::Binder<'tcx, ty::Term<'tcx>>,
     cx: &mut DocContext<'tcx>,
 ) -> Term {
@@ -526,7 +526,7 @@ fn should_fully_qualify_path(self_def_id: Option<DefId>, trait_: &Path, self_typ
             .map_or(!self_type.is_self_type(), |(id, trait_)| id != trait_)
 }
 
-fn projection_to_path_segment<'tcx>(
+pub(crate) fn projection_to_path_segment<'tcx>(
     proj: ty::Binder<'tcx, ty::AliasTerm<'tcx>>,
     cx: &mut DocContext<'tcx>,
 ) -> PathSegment {
@@ -2385,8 +2385,13 @@ fn clean_middle_opaque_bounds<'tcx>(
                 // RPITIT uses can imply `Sized` unless used behind indirection,
                 // so a precise check is necessary.
                 true
-            } else {
+            } else if impl_trait_def_id.is_local() {
                 opaque_needs_sized_check(&cx.tcx.opaque_ty_origin(impl_trait_def_id))
+            } else {
+                // Extern opaques don't carry origin metadata.
+                // Skip the use-site check to avoid an ICE.
+                // FIXME: Get metadata on sizedness for extern opaques, then make this precise.
+                false
             },
         },
     }
@@ -3214,7 +3219,7 @@ fn clean_assoc_item_constraint<'tcx>(
     }
 }
 
-fn clean_bound_vars<'tcx>(
+pub(crate) fn clean_bound_vars<'tcx>(
     bound_vars: &ty::List<ty::BoundVariableKind>,
     cx: &mut DocContext<'tcx>,
 ) -> Vec<GenericParamDef> {
